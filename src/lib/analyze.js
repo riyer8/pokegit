@@ -1,12 +1,12 @@
 /**
- * Full profile analysis orchestration for PokéGit v1.
+ * PokéGit Day-1 analysis orchestration.
  */
 
 import { request, GitHubError } from "./github-request.js";
 import { selectTopRepos, inspectRepoSignals } from "./inspect.js";
 import { scoreRepo, aggregateProfileScores } from "./score.js";
 import { assignPokemon } from "./pokemon.js";
-import { generateSummary } from "./summarize.js";
+import { generateSummary, detectAiAssistance } from "./summarize.js";
 
 export { GitHubError };
 
@@ -33,7 +33,8 @@ async function fetchUser(username) {
 }
 
 async function fetchRepos(username) {
-  const repos = [];
+  const owned = [];
+  let forkCount = 0;
   let rateLimitRemaining = null;
 
   for (let page = 1; page <= 2; page++) {
@@ -44,8 +45,11 @@ async function fetchRepos(username) {
     if (!Array.isArray(data) || data.length === 0) break;
 
     for (const r of data) {
-      if (r.fork) continue;
-      repos.push({
+      if (r.fork) {
+        forkCount += 1;
+        continue; // forks are not treated as original engineering work
+      }
+      owned.push({
         id: r.id,
         name: r.name,
         fullName: r.full_name,
@@ -61,6 +65,7 @@ async function fetchRepos(username) {
         license: r.license?.spdx_id || null,
         archived: r.archived,
         disabled: r.disabled,
+        isFork: false,
         createdAt: r.created_at,
         updatedAt: r.updated_at,
         pushedAt: r.pushed_at,
@@ -69,55 +74,85 @@ async function fetchRepos(username) {
     if (data.length < 30) break;
   }
 
-  return { repos, rateLimitRemaining };
+  return { repos: owned, forkCount, rateLimitRemaining };
 }
 
-/**
- * @param {string} username
- * @param {(phase: string) => void} [onProgress]
- */
+function languageSummary(repos) {
+  const totals = {};
+  for (const r of repos) {
+    if (!r.language) continue;
+    totals[r.language] = (totals[r.language] || 0) + Math.max(r.size || 1, 1);
+  }
+  const sum = Object.values(totals).reduce((a, b) => a + b, 0) || 1;
+  return Object.entries(totals)
+    .map(([name, w]) => ({ name, percent: Math.round((w / sum) * 1000) / 10 }))
+    .sort((a, b) => b.percent - a.percent)
+    .slice(0, 8);
+}
+
+function emptySummary(reason) {
+  return {
+    style: "",
+    strengths: [],
+    interesting: [],
+    concerns: [reason],
+    greens: [],
+    reds: [reason],
+    text: reason,
+    aiAssistance: {
+      level: "none",
+      label: "Little or no public evidence",
+      evidence: [],
+      summary: "Not enough public data to comment on AI-assisted development.",
+    },
+    source: "heuristic",
+  };
+}
+
 export async function analyzeProfile(username, onProgress = () => {}) {
   onProgress("profile");
   const { user, rateLimitRemaining: rem1 } = await fetchUser(username);
 
   if (user.type === "Organization") {
+    const reason = "Not enough public information to generate a meaningful profile. This looks like an organization, not an individual engineer.";
     return {
       insufficient: true,
-      insufficientReason:
-        "This is an organization account. PokéGit analyzes individual engineer profiles.",
+      insufficientReason: reason,
       user,
       analyzedRepos: [],
-      profileScores: {},
-      summary: {
-        text: "This is an organization account. PokéGit analyzes individual engineer profiles.",
-        source: "heuristic",
-      },
+      profileScores: { enoughData: false },
+      languageSummary: [],
+      forkCount: 0,
+      summary: emptySummary(reason),
       rateLimitRemaining: rem1,
       fetchedAt: new Date().toISOString(),
     };
   }
 
   onProgress("repos");
-  const { repos, rateLimitRemaining: rem2 } = await fetchRepos(username);
+  const { repos, forkCount, rateLimitRemaining: rem2 } = await fetchRepos(username);
 
   if (!repos.length) {
+    const reason =
+      forkCount > 0
+        ? "Not enough public information to generate a meaningful profile. Public repos here are mostly forks, which aren't counted as original engineering work."
+        : "Not enough public information to generate a meaningful profile.";
     return {
       insufficient: true,
-      insufficientReason:
-        "Not enough public data. No owned, non-fork repositories were found on this profile.",
+      insufficientReason: reason,
       user,
       analyzedRepos: [],
       profileScores: { enoughData: false },
-      summary: {
-        text: "Not enough public data. No owned, non-fork repositories were found on this profile.",
-        source: "heuristic",
-      },
+      languageSummary: [],
+      forkCount,
+      summary: emptySummary(reason),
       rateLimitRemaining: rem2 ?? rem1,
       fetchedAt: new Date().toISOString(),
     };
   }
 
-  const top = selectTopRepos(repos, 6);
+  // Cap analysis set: never try to inspect hundreds of repos
+  const top = selectTopRepos(repos, 8);
   onProgress("inspect");
 
   const analyzedRepos = await Promise.all(
@@ -144,8 +179,9 @@ export async function analyzeProfile(username, onProgress = () => {}) {
   );
 
   const profileScores = aggregateProfileScores(analyzedRepos);
+  const langs = languageSummary(repos);
+  const aiAssistanceHeuristic = detectAiAssistance(analyzedRepos);
 
-  // Extremely thin profiles
   const totalStars = analyzedRepos.reduce((s, a) => s + (a.repo.stargazers || 0), 0);
   const anySignal = analyzedRepos.some(
     (a) => a.signals.hasTests || a.signals.hasCi || a.signals.hasReadme || a.repo.stargazers > 0
@@ -155,14 +191,16 @@ export async function analyzeProfile(username, onProgress = () => {}) {
   let insufficientReason = null;
   if (analyzedRepos.length === 1 && totalStars === 0 && !anySignal) {
     insufficient = true;
-    insufficientReason =
-      "Not enough public data. This profile's public repos don't expose enough signals for a meaningful report yet.";
+    insufficientReason = "Not enough public information to generate a meaningful profile.";
   }
 
   const draft = {
     user,
     analyzedRepos,
     profileScores,
+    languageSummary: langs,
+    forkCount,
+    aiAssistanceHeuristic,
     insufficient,
     insufficientReason,
     repoUniverseSize: repos.length,
@@ -171,16 +209,27 @@ export async function analyzeProfile(username, onProgress = () => {}) {
   };
 
   onProgress("summary");
-  const summary = await generateSummary(draft);
+  let summary;
+  try {
+    summary = await generateSummary(draft);
+  } catch {
+    summary = {
+      ...emptySummary("AI insights unavailable."),
+      unavailable: true,
+      strengths: ["GitHub analysis completed without the language model."],
+      style: "Structured scores and Pokémon assignments are still available from public repo signals.",
+      source: "heuristic",
+      aiAssistance: aiAssistanceHeuristic,
+    };
+  }
+
   if (insufficient) {
-    summary.text = insufficientReason;
-    summary.source = "heuristic";
+    summary = emptySummary(insufficientReason);
   }
 
   return { ...draft, summary };
 }
 
-/** @deprecated use analyzeProfile */
 export async function fetchProfileBundle(username) {
   return analyzeProfile(username);
 }

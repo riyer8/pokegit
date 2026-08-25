@@ -1,68 +1,73 @@
 /**
- * Deterministic Pokémon assignment from repo characteristics.
- * Same inputs → same Pokémon. Visual language only — not a game.
+ * Deterministic Pokémon assignment. Same repo signals → same Pokémon.
  */
 
-const POKEDEX = {
-  Dragonite: {
-    name: "Dragonite",
-    emoji: "🐉",
-    blurb: "Mature · Complex · Backend-leaning",
-    signal: "Large, mature, complex project. Often a serious backend or long-lived codebase.",
-  },
+export const POKEDEX = {
   Pikachu: {
     name: "Pikachu",
     emoji: "⚡",
-    blurb: "Small · Focused · Fast-moving",
-    signal: "Small, focused, fast-moving tool or library. Ships useful slices quickly.",
+    blurb: "Small · Focused · Useful",
+    signal: "Small, focused, useful project. Ships a clear slice of value.",
+  },
+  Dragonite: {
+    name: "Dragonite",
+    emoji: "🐉",
+    blurb: "Large · Mature · Powerful",
+    signal: "Large, mature, powerful codebase. Serious long-lived work.",
   },
   Alakazam: {
     name: "Alakazam",
     emoji: "🧙",
-    blurb: "Complex · Experimental · Analytical",
-    signal: "Analytical / ML-leaning work. Math-heavy, experimental, or research-flavored.",
+    blurb: "Complex · Technical",
+    signal: "Complex / technical work. Heavy ideas, ML, or deep systems.",
+  },
+  Blastoise: {
+    name: "Blastoise",
+    emoji: "🛡️",
+    blurb: "Robust · Defensive",
+    signal: "Robust / defensive. Reliability, hardening, careful engineering.",
   },
   Blissey: {
     name: "Blissey",
-    emoji: "🩷",
-    blurb: "Strong testing · Careful · Supportive",
-    signal: "Strong testing and CI signals. Careful, support-oriented engineering habits.",
+    emoji: "🌸",
+    blurb: "Exceptional testing",
+    signal: "Exceptional testing and CI habits. Careful, support-oriented.",
   },
   Golem: {
     name: "Golem",
     emoji: "🪨",
-    blurb: "Infrastructure · Solid · Ops-minded",
-    signal: "Infrastructure / ops. Solid platform, devops, or systems-facing work.",
+    blurb: "Infrastructure",
+    signal: "Infrastructure / ops. Platform, devops, systems-facing work.",
   },
   Umbreon: {
     name: "Umbreon",
     emoji: "🌙",
-    blurb: "Security · Guarded · Precise",
-    signal: "Security-flavored. Auth, crypto, hardening, or similarly guarded domains.",
-  },
-  Ditto: {
-    name: "Ditto",
-    emoji: "🟣",
-    blurb: "Creative · Experimental · Adaptive",
-    signal: "Experimental / adaptive. Prototypes, playgrounds, or shape-shifting ideas.",
+    blurb: "Security",
+    signal: "Security-flavored. Auth, crypto, hardening, guarded domains.",
   },
   Sylveon: {
     name: "Sylveon",
-    emoji: "🎀",
-    blurb: "Frontend · Design · Interface-focused",
-    signal: "Frontend / design. Interface craft, UI systems, or visual product work.",
+    emoji: "🧚",
+    blurb: "Frontend · Design",
+    signal: "Frontend / design. Interface craft and visual product work.",
+  },
+  Ditto: {
+    name: "Ditto",
+    emoji: "🌀",
+    blurb: "Experimental",
+    signal: "Experimental. Prototypes, playgrounds, shape-shifting ideas.",
   },
   Snorlax: {
     name: "Snorlax",
     emoji: "😴",
-    blurb: "Quiet · Low recent activity",
-    signal: "Quiet or dormant. Little recent activity, or an archived project.",
+    blurb: "Dormant · Inactive",
+    signal: "Dormant or inactive. Little recent activity, or archived.",
   },
   Eevee: {
     name: "Eevee",
     emoji: "🦊",
-    blurb: "Versatile · Early-stage · Potential",
-    signal: "Early-stage or versatile. Still taking shape, with room to evolve.",
+    blurb: "Early-stage · Potential",
+    signal: "Early-stage or versatile. Still taking shape.",
   },
 };
 
@@ -72,18 +77,13 @@ function haystack(repo, signals) {
   } ${(signals.rootFiles || []).join(" ")}`.toLowerCase();
 }
 
-/**
- * @returns {{ name: string, emoji: string, blurb: string, tags: string[] }}
- */
 export function assignPokemon(repo, scores, signals = {}) {
   const hay = haystack(repo, signals);
-  const days =
-    (Date.now() - new Date(repo.pushedAt).getTime()) / (1000 * 60 * 60 * 24);
+  const days = (Date.now() - new Date(repo.pushedAt).getTime()) / (1000 * 60 * 60 * 24);
   const stars = repo.stargazers || 0;
   const size = repo.size || 0;
   const tags = [];
 
-  // Priority rules (order matters) — first match wins for specialty types
   if (repo.archived || days > 540) {
     tags.push("Dormant");
     return { ...POKEDEX.Snorlax, tags };
@@ -100,9 +100,7 @@ export function assignPokemon(repo, scores, signals = {}) {
   }
 
   if (
-    /machine-learning|ml-|deep-learning|llm|neural|pytorch|tensorflow|jupyter|data-sci|nlp/.test(
-      hay
-    ) ||
+    /machine-learning|ml-|deep-learning|llm|neural|pytorch|tensorflow|jupyter|data-sci|nlp/.test(hay) ||
     (repo.language === "Python" && /model|train|dataset|ml/.test(hay))
   ) {
     tags.push("ML");
@@ -110,9 +108,7 @@ export function assignPokemon(repo, scores, signals = {}) {
   }
 
   if (
-    /frontend|react|vue|svelte|css|design-system|ui-|ux|figma|tailwind|next\.?js|component/.test(
-      hay
-    ) ||
+    /frontend|react|vue|svelte|css|design-system|ui-|ux|figma|tailwind|next\.?js|component/.test(hay) ||
     ["HTML", "CSS", "Vue"].includes(repo.language)
   ) {
     tags.push("Frontend");
@@ -124,35 +120,41 @@ export function assignPokemon(repo, scores, signals = {}) {
     return { ...POKEDEX.Blissey, tags };
   }
 
-  if (/experiment|prototype|playground|sandbox|hack|demo|wip/.test(hay) || /ditto/.test(hay)) {
+  if (
+    (scores.testing >= 7 && signals.hasCi && signals.hasTests) ||
+    /reliability|resilience|hardening|observability|robust/.test(hay)
+  ) {
+    if (scores.maintenance >= 7 || scores.architecture >= 7) {
+      tags.push("Robust");
+      return { ...POKEDEX.Blastoise, tags };
+    }
+  }
+
+  if (/experiment|prototype|playground|sandbox|hack|demo|wip/.test(hay)) {
     tags.push("Experimental");
     return { ...POKEDEX.Ditto, tags };
   }
 
-  // Size / maturity heuristics
-  const mature =
-    stars >= 80 ||
-    size >= 2000 ||
-    (days < 180 && size >= 500 && stars >= 20);
-
+  const mature = stars >= 80 || size >= 2000 || (days < 180 && size >= 500 && stars >= 20);
   const smallFocused = size < 400 && stars < 200 && days < 365;
 
   if (mature && (scores.maintenance >= 7 || stars >= 200) && size >= 800) {
     tags.push("Mature", repo.language || "Backend");
     return {
       ...POKEDEX.Dragonite,
-      blurb: `Mature · ${repo.language || "Polyglot"} · Well maintained`,
+      blurb: `Mature · ${repo.language || "Polyglot"} · Powerful`,
       tags,
     };
   }
 
+  if (scores.complexity >= 8 && size >= 500) {
+    tags.push("Complex");
+    return { ...POKEDEX.Alakazam, tags };
+  }
+
   if (smallFocused || (size < 250 && days < 120)) {
     tags.push("Focused");
-    return {
-      ...POKEDEX.Pikachu,
-      blurb: "Small · Focused · Fast-moving",
-      tags,
-    };
+    return { ...POKEDEX.Pikachu, tags };
   }
 
   if (stars < 5 && days < 90 && size < 800) {
@@ -160,14 +162,9 @@ export function assignPokemon(repo, scores, signals = {}) {
     return { ...POKEDEX.Eevee, tags };
   }
 
-  // Default: Dragonite for substantial, Pikachu for light, Eevee otherwise
   if (size >= 1000 || stars >= 50) {
     tags.push(repo.language || "General");
-    return {
-      ...POKEDEX.Dragonite,
-      blurb: `Substantial · ${repo.language || "Mixed"} · Active`,
-      tags,
-    };
+    return { ...POKEDEX.Dragonite, tags };
   }
 
   if (scores.testing >= 7) {
@@ -177,5 +174,3 @@ export function assignPokemon(repo, scores, signals = {}) {
   tags.push(repo.language || "General");
   return { ...POKEDEX.Eevee, tags };
 }
-
-export { POKEDEX };
