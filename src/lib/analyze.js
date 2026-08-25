@@ -1,5 +1,5 @@
 /**
- * PokéGit Day-1 analysis orchestration.
+ * PokéGit analysis orchestration (Day 2: observations + evidence + drill-down).
  */
 
 import { request, GitHubError } from "./github-request.js";
@@ -7,6 +7,12 @@ import { selectTopRepos, inspectRepoSignals } from "./inspect.js";
 import { scoreRepo, aggregateProfileScores } from "./score.js";
 import { assignPokemon } from "./pokemon.js";
 import { generateSummary, detectAiAssistance } from "./summarize.js";
+import {
+  buildObservations,
+  buildEvidence,
+  buildGlance,
+  buildRepoDrilldown,
+} from "./insights.js";
 
 export { GitHubError };
 
@@ -93,14 +99,17 @@ function languageSummary(repos) {
 function emptySummary(reason) {
   return {
     style: "",
+    glanceHeadline: "",
+    oneLiner: "",
     strengths: [],
     interesting: [],
-    concerns: [reason],
+    concerns: [{ text: reason, kind: "uncertain" }],
     greens: [],
     reds: [reason],
     text: reason,
     aiAssistance: {
       level: "none",
+      confidence: "medium",
       label: "Little or no public evidence",
       evidence: [],
       summary: "Not enough public data to comment on AI-assisted development.",
@@ -122,6 +131,9 @@ export async function analyzeProfile(username, onProgress = () => {}) {
       analyzedRepos: [],
       profileScores: { enoughData: false },
       languageSummary: [],
+      observations: [],
+      evidence: [],
+      glance: null,
       forkCount: 0,
       summary: emptySummary(reason),
       rateLimitRemaining: rem1,
@@ -144,6 +156,9 @@ export async function analyzeProfile(username, onProgress = () => {}) {
       analyzedRepos: [],
       profileScores: { enoughData: false },
       languageSummary: [],
+      observations: [],
+      evidence: [],
+      glance: null,
       forkCount,
       summary: emptySummary(reason),
       rateLimitRemaining: rem2 ?? rem1,
@@ -174,13 +189,17 @@ export async function analyzeProfile(username, onProgress = () => {}) {
       }
       const scores = scoreRepo(repo, signals);
       const pokemon = assignPokemon(repo, scores, signals);
-      return { repo, signals, scores, pokemon };
+      const item = { repo, signals, scores, pokemon };
+      item.drilldown = buildRepoDrilldown(item);
+      return item;
     })
   );
 
   const profileScores = aggregateProfileScores(analyzedRepos);
   const langs = languageSummary(repos);
   const aiAssistanceHeuristic = detectAiAssistance(analyzedRepos);
+  const observations = buildObservations(analyzedRepos, profileScores, langs);
+  const evidence = buildEvidence(analyzedRepos, profileScores);
 
   const totalStars = analyzedRepos.reduce((s, a) => s + (a.repo.stargazers || 0), 0);
   const anySignal = analyzedRepos.some(
@@ -201,6 +220,8 @@ export async function analyzeProfile(username, onProgress = () => {}) {
     languageSummary: langs,
     forkCount,
     aiAssistanceHeuristic,
+    observations,
+    evidence,
     insufficient,
     insufficientReason,
     repoUniverseSize: repos.length,
@@ -216,7 +237,12 @@ export async function analyzeProfile(username, onProgress = () => {}) {
     summary = {
       ...emptySummary("AI insights unavailable."),
       unavailable: true,
-      strengths: ["GitHub analysis completed without the language model."],
+      strengths: [
+        {
+          text: "GitHub analysis completed without the language model.",
+          kind: "observed",
+        },
+      ],
       style: "Structured scores and Pokémon assignments are still available from public repo signals.",
       source: "heuristic",
       aiAssistance: aiAssistanceHeuristic,
@@ -227,7 +253,8 @@ export async function analyzeProfile(username, onProgress = () => {}) {
     summary = emptySummary(insufficientReason);
   }
 
-  return { ...draft, summary };
+  const glance = buildGlance(user, profileScores, observations, summary);
+  return { ...draft, summary, glance };
 }
 
 export async function fetchProfileBundle(username) {

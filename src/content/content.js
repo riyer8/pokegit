@@ -18,17 +18,17 @@
   ];
 
   const POKE_LEGEND = [
-    { name: "Pikachu", emoji: "⚡", meaning: "Small, focused, useful project" },
-    { name: "Dragonite", emoji: "🐉", meaning: "Large, mature, powerful codebase" },
-    { name: "Alakazam", emoji: "🧙", meaning: "Complex / technical work" },
-    { name: "Blastoise", emoji: "🛡️", meaning: "Robust / defensive engineering" },
-    { name: "Blissey", emoji: "🌸", meaning: "Exceptional testing & CI" },
-    { name: "Golem", emoji: "🪨", meaning: "Infrastructure / ops" },
-    { name: "Umbreon", emoji: "🌙", meaning: "Security-flavored work" },
-    { name: "Sylveon", emoji: "🧚", meaning: "Frontend / design" },
-    { name: "Ditto", emoji: "🌀", meaning: "Experimental / prototype" },
-    { name: "Snorlax", emoji: "😴", meaning: "Dormant or inactive" },
-    { name: "Eevee", emoji: "🦊", meaning: "Early-stage / still taking shape" },
+    { name: "Pikachu", emoji: "⚡", meaning: "Small, focused, useful", personality: "Small but energetic" },
+    { name: "Dragonite", emoji: "🐉", meaning: "Large, mature, powerful", personality: "Mature powerhouse" },
+    { name: "Alakazam", emoji: "🧙", meaning: "Complex / technical work", personality: "Complex thinker" },
+    { name: "Blastoise", emoji: "🛡️", meaning: "Robust / defensive", personality: "Built to hold the line" },
+    { name: "Blissey", emoji: "🌸", meaning: "Exceptional testing & CI", personality: "Protects everything with tests" },
+    { name: "Golem", emoji: "🪨", meaning: "Infrastructure / ops", personality: "Infrastructure bedrock" },
+    { name: "Umbreon", emoji: "🌙", meaning: "Security-flavored work", personality: "Security-minded" },
+    { name: "Sylveon", emoji: "🧚", meaning: "Frontend / design", personality: "Interface-first" },
+    { name: "Ditto", emoji: "🌀", meaning: "Experimental / prototype", personality: "Shapeshifting experiment" },
+    { name: "Snorlax", emoji: "😴", meaning: "Dormant or inactive", personality: "Quiet for now" },
+    { name: "Eevee", emoji: "🦊", meaning: "Early-stage / still taking shape", personality: "Still evolving" },
   ];
 
   const POKE_BY_NAME = Object.fromEntries(POKE_LEGEND.map((p) => [p.name, p]));
@@ -77,7 +77,7 @@
     return escaped.replace(re, (match) => {
       const p = POKE_BY_NAME[match];
       if (!p) return match;
-      const tip = `${p.emoji} ${p.name}: ${p.meaning}`;
+      const tip = `${p.emoji} ${p.name}: ${p.personality || p.meaning}`;
       return `<span class="pg-poke-term" tabindex="0"><span class="pg-poke-term-label">${match}</span><span class="pg-tip" role="tooltip">${escapeHtml(tip)}</span></span>`;
     });
   }
@@ -87,14 +87,17 @@
       (p) => `
         <div class="pg-legend-row">
           <span class="pg-legend-emoji" aria-hidden="true">${p.emoji}</span>
-          <span class="pg-legend-name">${escapeHtml(p.name)}</span>
-          <span class="pg-legend-meaning">${escapeHtml(p.meaning)}</span>
+          <div class="pg-legend-copy">
+            <span class="pg-legend-name">${escapeHtml(p.name)}</span>
+            <span class="pg-legend-personality">“${escapeHtml(p.personality)}”</span>
+            <span class="pg-legend-meaning">${escapeHtml(p.meaning)}</span>
+          </div>
         </div>`
     ).join("");
     return `
       <div class="pg-legend">
         <h3 class="pg-card-title">Pokémon key</h3>
-        <p class="pg-keys-lede">Each repo gets one of these as visual shorthand.</p>
+        <p class="pg-keys-lede">Each repo gets one of these as visual shorthand, with a reason.</p>
         <div class="pg-legend-list">${rows}</div>
       </div>`;
   }
@@ -320,10 +323,15 @@
 
     if (loading) {
       body.innerHTML = `
-        <div class="pg-state">
-          <div class="pg-spinner" aria-hidden="true"></div>
-          <h3>Loading…</h3>
-          <p>Reading @${escapeHtml(currentUsername)}. Pulling repos, scoring signals, assigning Pokémon.</p>
+        <div class="pg-state pg-loading-state">
+          <div class="pg-pokeball-load" aria-hidden="true"></div>
+          <h3>Analyzing @${escapeHtml(currentUsername)}</h3>
+          <ul class="pg-load-steps">
+            <li class="is-on">Fetching public profile</li>
+            <li class="is-on">Inspecting top repositories</li>
+            <li class="is-pulse">Scoring signals &amp; assigning Pokémon</li>
+            <li>Writing observations</li>
+          </ul>
         </div>`;
       return;
     }
@@ -332,7 +340,8 @@
       const rateLimited = lastError.status === 403 || lastError.status === 429;
       const notFound = lastError.status === 404;
       body.innerHTML = `
-        <div class="pg-state">
+        <div class="pg-state pg-error-state">
+          <div class="pg-error-mark" aria-hidden="true">!</div>
           <h3>Couldn't analyze this profile</h3>
           <p>${escapeHtml(
             notFound
@@ -443,13 +452,14 @@
     });
   }
 
-  function renderScoreBars(scores) {
-    return SCORE_ROWS.map(([label, key, icon]) => {
+  function renderScoreBars(scores, animate = true) {
+    return SCORE_ROWS.map(([label, key, icon], i) => {
       const score = scores?.[key];
       const v = score == null ? 0 : Math.max(0, Math.min(10, score));
       const display = score == null ? "—" : v.toFixed(1);
+      const delay = animate ? `style="--pg-i:${i}"` : "";
       return `
-        <div class="pg-bar-row">
+        <div class="pg-bar-row ${animate ? "pg-anim-bar" : ""}" ${delay}>
           <div class="pg-bar-label">${icon} ${escapeHtml(label)}</div>
           <div class="pg-bar-track"><div class="pg-bar-fill" style="width:${v * 10}%"></div></div>
           <div class="pg-bar-val">${display}</div>
@@ -457,29 +467,168 @@
     }).join("");
   }
 
-  function identityBlock(user) {
-    const role =
+  function kindBadge(kind) {
+    const k = kind || "inferred";
+    const label = k === "observed" ? "Observed" : k === "uncertain" ? "Uncertain" : "Inferred";
+    return `<span class="pg-kind pg-kind-${escapeAttr(k)}">${label}</span>`;
+  }
+
+  function insightItems(items) {
+    if (!items?.length) return [];
+    return items.map((item) => {
+      if (typeof item === "string") return { text: item, kind: "inferred", evidence: [] };
+      return item;
+    });
+  }
+
+  function renderGlance(payload) {
+    const user = payload.user;
+    const glance = payload.glance || {};
+    const summary = payload.summary || {};
+    const headline =
+      glance.headline ||
+      summary.glanceHeadline ||
       user.bio?.split(/[.\n]/)[0]?.trim() ||
-      [user.company, user.location].filter(Boolean).join(" · ") ||
-      "GitHub engineer";
+      "Public GitHub engineer";
+    const oneLiner = glance.oneLiner || summary.oneLiner || summary.style || "";
+    const strongest = glance.strongest?.length
+      ? glance.strongest
+      : SCORE_ROWS.slice(0, 4).map(([label, key, icon]) => ({
+          label,
+          key,
+          icon,
+          score: payload.profileScores?.[key],
+        }));
+
+    const bars = strongest
+      .filter((d) => d.score != null)
+      .map((d, i) => {
+        const v = Math.max(0, Math.min(10, d.score));
+        return `
+          <div class="pg-bar-row pg-anim-bar" style="--pg-i:${i}">
+            <div class="pg-bar-label">${d.icon} ${escapeHtml(d.label)}</div>
+            <div class="pg-bar-track"><div class="pg-bar-fill" style="width:${v * 10}%"></div></div>
+            <div class="pg-bar-val">${v.toFixed(1)}</div>
+          </div>`;
+      })
+      .join("");
+
     return `
-      <div class="pg-hero">
-        <img class="pg-avatar" src="${escapeAttr(user.avatarUrl)}" alt="" width="64" height="64" />
-        <div class="pg-identity">
-          <p class="pg-handle">@${escapeHtml(user.login)}</p>
-          <p class="pg-role">${escapeHtml(user.name || role)}</p>
-          ${user.bio ? `<p class="pg-role">${escapeHtml(role)}</p>` : ""}
-          <p class="pg-meta">${escapeHtml(
-            [
-              user.company,
-              user.location,
-              `${user.publicRepos ?? "?"} repos`,
-              user.followers != null ? `${user.followers} followers` : null,
-            ]
-              .filter(Boolean)
-              .join(" · ")
-          )}</p>
+      <section class="pg-glance pg-anim-in">
+        <div class="pg-glance-top">
+          <img class="pg-avatar pg-avatar-sm" src="${escapeAttr(user.avatarUrl)}" alt="" width="48" height="48" />
+          <div>
+            <p class="pg-handle">@${escapeHtml(user.login)}</p>
+            <p class="pg-glance-archetype">${escapeHtml(headline)}</p>
+          </div>
         </div>
+        <p class="pg-glance-label">Strongest signals</p>
+        <div class="pg-bars pg-glance-bars">${bars}</div>
+        ${
+          oneLiner
+            ? `<p class="pg-glance-quote">“${escapeHtml(oneLiner.replace(/^["“]|["”]$/g, ""))}”</p>`
+            : ""
+        }
+      </section>`;
+  }
+
+  function renderObservations(observations = []) {
+    if (!observations.length) return "";
+    const cards = observations
+      .map(
+        (o, i) => `
+        <article class="pg-obs pg-anim-fade" style="--pg-i:${i}">
+          <div class="pg-obs-head">
+            <span class="pg-obs-icon" aria-hidden="true">${o.icon || "✦"}</span>
+            <div class="pg-obs-titles">
+              <h4>${escapeHtml(o.title)}</h4>
+              ${kindBadge(o.kind)}
+            </div>
+          </div>
+          <p>${linkPokemonTerms(o.body)}</p>
+          ${
+            o.evidence?.length
+              ? `<ul class="pg-evidence">${o.evidence
+                  .map((e) => `<li><span class="pg-check">✓</span>${escapeHtml(e)}</li>`)
+                  .join("")}</ul>`
+              : ""
+          }
+        </article>`
+      )
+      .join("");
+    return `
+      <section class="pg-obs-section">
+        <h3 class="pg-section-title">Interesting signals</h3>
+        ${cards}
+      </section>`;
+  }
+
+  function renderEvidenceBlock(evidence = []) {
+    if (!evidence.length) return "";
+    const rows = evidence
+      .map(
+        (e) => `
+        <li class="${e.ok ? "is-ok" : "is-miss"}">
+          <span class="pg-check">${e.ok ? "✓" : "·"}</span>
+          ${escapeHtml(e.text)}
+        </li>`
+      )
+      .join("");
+    return `
+      <section class="pg-evidence-block pg-anim-fade" style="--pg-i:2">
+        <h3 class="pg-section-title">Why we think this</h3>
+        <ul class="pg-evidence">${rows}</ul>
+      </section>`;
+  }
+
+  function renderLabeledList(title, items, cls) {
+    const list = insightItems(items);
+    if (!list.length) return "";
+    return `
+      <div class="pg-flag-col ${cls}">
+        <h4>${title}</h4>
+        <ul>
+          ${list
+            .map(
+              (i) => `
+            <li>
+              <div class="pg-flag-item">
+                <div class="pg-flag-item-top">
+                  ${kindBadge(i.kind)}
+                  <span>${linkPokemonTerms(i.text)}</span>
+                </div>
+                ${
+                  i.evidence?.length
+                    ? `<ul class="pg-evidence pg-evidence-tight">${i.evidence
+                        .map((e) => `<li><span class="pg-check">✓</span>${escapeHtml(e)}</li>`)
+                        .join("")}</ul>`
+                    : ""
+                }
+              </div>
+            </li>`
+            )
+            .join("")}
+        </ul>
+      </div>`;
+  }
+
+  function renderAiCard(ai) {
+    if (!ai) return "";
+    return `
+      <div class="pg-ai-card pg-anim-fade" style="--pg-i:3">
+        <h4>🤖 AI-assisted development</h4>
+        <div class="pg-ai-meta">
+          <span>Signal: <strong>${escapeHtml(ai.label || ai.level)}</strong></span>
+          <span>Confidence: <strong>${escapeHtml(ai.confidence || "low")}</strong></span>
+        </div>
+        <p>${linkPokemonTerms(ai.summary || "")}</p>
+        ${
+          ai.evidence?.length
+            ? `<ul class="pg-ai-evidence">${ai.evidence
+                .map((e) => `<li>${linkPokemonTerms(e)}</li>`)
+                .join("")}</ul>`
+            : ""
+        }
       </div>`;
   }
 
@@ -487,44 +636,21 @@
     const style = summary?.style
       ? `<p class="pg-style">${linkPokemonTerms(summary.style)}</p>`
       : "";
-    const list = (title, items, cls) => {
-      if (!items?.length) return "";
-      return `
-        <div class="pg-flag-col ${cls}">
-          <h4>${title}</h4>
-          <ul>${items.map((i) => `<li>${linkPokemonTerms(i)}</li>`).join("")}</ul>
-        </div>`;
-    };
-    const ai = summary?.aiAssistance;
-    const aiBlock = ai
-      ? `
-        <div class="pg-ai-card">
-          <h4>AI-assisted development</h4>
-          <p class="pg-ai-level">${escapeHtml(ai.label || ai.level)}</p>
-          <p>${linkPokemonTerms(ai.summary || "")}</p>
-          ${
-            ai.evidence?.length
-              ? `<ul class="pg-ai-evidence">${ai.evidence.map((e) => `<li>${linkPokemonTerms(e)}</li>`).join("")}</ul>`
-              : ""
-          }
-        </div>`
-      : "";
-
     return `
       ${style}
       ${summary?.unavailable ? `<p class="pg-ai-fallback">AI insights unavailable. Showing structured GitHub signals instead.</p>` : ""}
       <div class="pg-flags">
-        ${list("Strengths", summary?.strengths, "pg-flag-green")}
-        ${list("Interesting signals", summary?.interesting, "pg-flag-interesting")}
-        ${list("Potential concerns", summary?.concerns, "pg-flag-red")}
+        ${renderLabeledList("Strengths", summary?.strengths, "pg-flag-green")}
+        ${renderLabeledList("Interesting", summary?.interesting, "pg-flag-interesting")}
+        ${renderLabeledList("Potential concerns", summary?.concerns, "pg-flag-red")}
       </div>
-      ${aiBlock}`;
+      ${renderAiCard(summary?.aiAssistance)}`;
   }
 
   function renderInsufficient(payload) {
     return `
-      ${identityBlock(payload.user)}
-      <div class="pg-card">
+      <div class="pg-card pg-anim-in">
+        <p class="pg-handle">@${escapeHtml(payload.user.login)}</p>
         <h3 class="pg-card-title">Not enough public information</h3>
         <p class="pg-style">${escapeHtml(
           payload.insufficientReason || "Not enough public information to generate a meaningful profile."
@@ -533,17 +659,81 @@
   }
 
   function renderProfileTab(payload) {
-    const { user, profileScores, summary } = payload;
+    if (payload.insufficient) return renderInsufficient(payload);
+    const { profileScores, summary, observations, evidence } = payload;
     return `
-      ${identityBlock(user)}
-      <div class="pg-card">
-        <h3 class="pg-card-title">Engineering profile</h3>
+      ${renderGlance(payload)}
+      ${renderObservations(observations)}
+      ${renderEvidenceBlock(evidence)}
+      <div class="pg-card pg-anim-fade" style="--pg-i:1">
+        <h3 class="pg-card-title">Full scoreboard</h3>
         <div class="pg-bars">${renderScoreBars(profileScores)}</div>
         <p class="pg-disclaimer">${escapeHtml(DISCLAIMER)}</p>
       </div>
-      <div class="pg-stands">
+      <div class="pg-stands pg-anim-fade" style="--pg-i:2">
         <h3>What stands out</h3>
         ${renderInsightBlocks(summary)}
+      </div>`;
+  }
+
+  function renderRepoDrilldown(item) {
+    const { repo, pokemon, scores, signals, drilldown } = item;
+    const dd = drilldown || {};
+    const scoreRows = [
+      ["Quality", scores.architecture],
+      ["Testing", scores.testing],
+      ["Maintenance", scores.maintenance],
+      ["Complexity", scores.complexity],
+    ]
+      .map(
+        ([label, v]) => `
+        <div class="pg-mini-score">
+          <span>${escapeHtml(label)}</span>
+          <strong>${v == null ? "—" : Number(v).toFixed(1)}</strong>
+        </div>`
+      )
+      .join("");
+
+    const checks = (dd.checks || [])
+      .map(
+        (c) => `
+        <li class="${c.ok ? "is-ok" : "is-miss"}">
+          <span class="pg-check">${c.ok ? "✓" : "·"}</span>
+          ${escapeHtml(c.text)}
+        </li>`
+      )
+      .join("");
+
+    const interesting = (dd.interesting || [])
+      .map((t) => `<li>• ${escapeHtml(t)}</li>`)
+      .join("");
+
+    return `
+      <div class="pg-drill">
+        <p class="pg-drill-role">${escapeHtml(dd.roleGuess || repo.language || "Project")}</p>
+        <div class="pg-mini-scores">${scoreRows}</div>
+        <div class="pg-drill-why">
+          <h4>${escapeHtml(dd.whyTitle || `Why ${pokemon.name}?`)}</h4>
+          <p>${linkPokemonTerms(dd.whyBody || pokemon.why || pokemon.signal)}</p>
+        </div>
+        ${
+          checks
+            ? `<div class="pg-drill-block"><h4>Signals</h4><ul class="pg-evidence">${checks}</ul></div>`
+            : ""
+        }
+        ${
+          interesting
+            ? `<div class="pg-drill-block"><h4>Interesting</h4><ul class="pg-interesting-list">${interesting}</ul></div>`
+            : ""
+        }
+        <div class="pg-repo-foot">
+          <span>★ ${repo.stargazers || 0}</span>
+          <span>${escapeHtml(repo.language || "—")}</span>
+          <span>Updated ${escapeHtml(relativeTime(repo.pushedAt))}</span>
+          <span>Tests ${signals.hasTests ? "yes" : "no"}</span>
+          <span>CI ${signals.hasCi ? "yes" : "no"}</span>
+        </div>
+        <a class="pg-repo-link" href="${escapeAttr(repo.htmlUrl)}" target="_blank" rel="noopener noreferrer">Open on GitHub →</a>
       </div>`;
   }
 
@@ -552,43 +742,35 @@
     if (!repos.length) return `<div class="pg-empty">No repositories in this analysis.</div>`;
 
     const cards = repos
-      .map((item) => {
-        const { repo, pokemon, scores, signals } = item;
+      .map((item, i) => {
+        const { repo, pokemon } = item;
         const open = expandedRepos.has(repo.id);
-        const tip = pokemon.signal || pokemon.blurb;
+        const tip = pokemon.personality
+          ? `${pokemon.name}: ${pokemon.personality}`
+          : `${pokemon.name}: ${pokemon.signal || pokemon.blurb}`;
         return `
-          <div class="pg-repo ${open ? "is-open" : ""}" data-repo-id="${repo.id}">
-            <button type="button" class="pg-repo-head" data-expand="${repo.id}">
-              <div class="pg-repo-mark" data-tip="${escapeAttr(`${pokemon.name}: ${tip}`)}">
+          <div class="pg-repo ${open ? "is-open" : ""}" data-repo-id="${repo.id}" style="--pg-i:${i}">
+            <button type="button" class="pg-repo-head" data-expand="${repo.id}" aria-expanded="${open ? "true" : "false"}">
+              <div class="pg-repo-mark" data-tip="${escapeAttr(tip)}">
                 <span class="pg-repo-emoji">${pokemon.emoji}</span>
-                <span class="pg-tip" role="tooltip">${escapeHtml(pokemon.name)}: ${escapeHtml(tip)}</span>
+                <span class="pg-tip" role="tooltip">${escapeHtml(tip)}</span>
               </div>
               <div class="pg-repo-text">
                 <div class="pg-repo-title">
                   <span class="pg-repo-name">${escapeHtml(repo.name)}</span>
                   <span class="pg-repo-poke">${escapeHtml(pokemon.name)}</span>
                 </div>
-                <p class="pg-repo-blurb">${escapeHtml(pokemon.blurb)}</p>
+                <p class="pg-repo-blurb">${escapeHtml(pokemon.personality || pokemon.blurb)}</p>
+                ${
+                  pokemon.why
+                    ? `<p class="pg-repo-why-preview">${escapeHtml(pokemon.why)}</p>`
+                    : ""
+                }
               </div>
               <span class="pg-repo-chevron" aria-hidden="true">${open ? "▾" : "▸"}</span>
             </button>
             <div class="pg-repo-body" ${open ? "" : "hidden"}>
-              ${repo.description ? `<p class="pg-repo-desc">${escapeHtml(repo.description)}</p>` : ""}
-              <div class="pg-repo-foot">
-                <span>★ ${repo.stargazers || 0}</span>
-                <span>${escapeHtml(repo.language || "—")}</span>
-                <span>Updated ${escapeHtml(relativeTime(repo.pushedAt))}</span>
-                ${repo.license ? `<span>${escapeHtml(repo.license)}</span>` : ""}
-              </div>
-              <div class="pg-repo-foot">
-                <span>Tests ${signals.hasTests ? "yes" : "no"}</span>
-                <span>CI ${signals.hasCi ? "yes" : "no"}</span>
-                <span>README ${signals.hasReadme ? "yes" : "no"}</span>
-                <span>Arch ${scores.architecture}</span>
-                <span>Test ${scores.testing}</span>
-                <span>Maint ${scores.maintenance}</span>
-              </div>
-              <a class="pg-repo-link" href="${escapeAttr(repo.htmlUrl)}" target="_blank" rel="noopener noreferrer">Open on GitHub →</a>
+              ${renderRepoDrilldown(item)}
             </div>
           </div>`;
       })
@@ -599,17 +781,37 @@
         Showing ${repos.length} of ${payload.repoUniverseSize ?? "?"} owned non-fork repos
         ${payload.forkCount ? ` · ${payload.forkCount} forks excluded` : ""}
       </p>
-      <div class="pg-card pg-repo-card">${cards}</div>`;
+      <div class="pg-card pg-repo-card pg-anim-in">${cards}</div>`;
   }
 
   function wireRepoExpands(body) {
     body.querySelectorAll("[data-expand]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const id = Number(btn.getAttribute("data-expand"));
-        if (expandedRepos.has(id)) expandedRepos.delete(id);
-        else expandedRepos.add(id);
-        body.innerHTML = renderReposTab(lastPayload);
-        wireRepoExpands(body);
+        const card = btn.closest(".pg-repo");
+        if (!card) return;
+
+        const opening = !expandedRepos.has(id);
+        if (opening) expandedRepos.add(id);
+        else expandedRepos.delete(id);
+
+        card.classList.toggle("is-open", opening);
+        btn.setAttribute("aria-expanded", opening ? "true" : "false");
+
+        const chevron = btn.querySelector(".pg-repo-chevron");
+        if (chevron) chevron.textContent = opening ? "▾" : "▸";
+
+        const panel = card.querySelector(".pg-repo-body");
+        if (panel) {
+          if (opening) {
+            panel.hidden = false;
+            panel.classList.remove("is-collapsing");
+            panel.classList.add("is-expanding");
+          } else {
+            panel.classList.remove("is-expanding");
+            panel.hidden = true;
+          }
+        }
       });
     });
   }
@@ -625,7 +827,7 @@
 
     return `
       <h3 class="pg-section-title">Code signals</h3>
-      <div class="pg-card">
+      <div class="pg-card pg-anim-in">
         <div class="pg-activity">
           <div class="pg-activity-row"><span>Repos with tests</span><strong>${withTests}/${repos.length}</strong></div>
           <div class="pg-activity-row"><span>Repos with CI</span><strong>${withCi}/${repos.length}</strong></div>
@@ -633,14 +835,17 @@
         </div>
       </div>
       <h3 class="pg-section-title">Languages</h3>
-      <div class="pg-langs">${langs || `<span class="pg-empty">No language data</span>`}</div>`;
+      <div class="pg-langs">${langs || `<span class="pg-empty">No language data</span>`}</div>
+      ${renderEvidenceBlock(payload.evidence || [])}`;
   }
 
   function renderSignalsTab(payload) {
     return `
       <div class="pg-stands">
         <h3>Insights</h3>
+        ${renderObservations(payload.observations || [])}
         ${renderInsightBlocks(payload.summary)}
+        ${renderEvidenceBlock(payload.evidence || [])}
       </div>`;
   }
 
