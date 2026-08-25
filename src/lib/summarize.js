@@ -363,6 +363,8 @@ Epistemic rules (critical):
 - Name concrete repos when useful.
 - concerns: only with evidence. Empty array is fine. Never say "bad engineer".
 - For dormant repos, allow "may simply be finished".
+- Never invent skill rankings, seniority labels, IQ, or personality diagnoses.
+- Prefer "public work suggests…" over "they are…".
 - aiAssistance confidence is usually "low" when any AI tooling signal exists. Never invent % AI code.
 - Only claim what the data supports.`;
 

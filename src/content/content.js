@@ -178,10 +178,11 @@
       <aside class="pokegit-panel" role="dialog" aria-modal="true" aria-label="PokéGit analysis" data-theme="light">
         <header class="pokegit-header">
           <div>
-            <div class="pokegit-brand-name">✨ Poké<span>Git</span></div>
-            <div class="pokegit-brand-sub">Public GitHub engineering profile</div>
+            <div class="pokegit-brand-name">Poké<span>Git</span></div>
+            <div class="pokegit-brand-sub">Public GitHub, playfully read</div>
           </div>
           <div class="pokegit-header-actions">
+            <button type="button" class="pokegit-icon-btn" data-share title="Copy shareable summary" aria-label="Copy shareable summary" hidden>Share</button>
             <button type="button" class="pokegit-icon-btn" data-settings title="Settings" aria-label="Settings">⚙</button>
             <button type="button" class="pokegit-close" data-close aria-label="Close">×</button>
           </div>
@@ -189,9 +190,9 @@
         <nav class="pokegit-tabs" role="tablist" data-tabs>
           <button type="button" class="pokegit-tab is-active" data-tab="profile" role="tab">Profile</button>
           <button type="button" class="pokegit-tab" data-tab="repos" role="tab">Repos</button>
-          <button type="button" class="pokegit-tab" data-tab="code" role="tab">Code</button>
-          <button type="button" class="pokegit-tab" data-tab="signals" role="tab">Signals</button>
+          <button type="button" class="pokegit-tab" data-tab="about" role="tab">About</button>
         </nav>
+        <div class="pokegit-toast" data-toast hidden></div>
         <div class="pokegit-body" data-body></div>
       </aside>
     `;
@@ -202,6 +203,9 @@
       showSettings = !showSettings;
       updateTabsVisibility();
       renderBody();
+    });
+    wrap.querySelector("[data-share]")?.addEventListener("click", () => {
+      copyShareSummary();
     });
     wrap.querySelectorAll("[data-tab]").forEach((el) => {
       el.addEventListener("click", () => {
@@ -226,6 +230,42 @@
     const tabs = state.shadow?.querySelector("[data-tabs]");
     if (tabs) tabs.hidden = showSettings;
     state.shadow?.querySelector("[data-settings]")?.classList.toggle("is-active", showSettings);
+    const shareBtn = state.shadow?.querySelector("[data-share]");
+    if (shareBtn) {
+      shareBtn.hidden = showSettings || loading || !lastPayload || Boolean(lastError);
+    }
+  }
+
+  function showToast(message) {
+    const toast = state.shadow?.querySelector("[data-toast]");
+    if (!toast) return;
+    toast.textContent = message;
+    toast.hidden = false;
+    toast.classList.add("is-visible");
+    window.clearTimeout(showToast._t);
+    showToast._t = window.setTimeout(() => {
+      toast.classList.remove("is-visible");
+      toast.hidden = true;
+    }, 2200);
+  }
+
+  async function copyShareSummary() {
+    if (!lastPayload) {
+      showToast("Analyze a profile first");
+      return;
+    }
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: "POKEGIT_BUILD_SHARE",
+        payload: lastPayload,
+      });
+      const text = res?.ok ? res.text : null;
+      if (!text) throw new Error("Could not build summary");
+      await navigator.clipboard.writeText(text);
+      showToast("Profile summary copied");
+    } catch {
+      showToast("Couldn't copy — try again");
+    }
   }
 
   function openPanel(forceRefresh = false) {
@@ -372,12 +412,15 @@
       return;
     }
 
-    if (activeTab === "profile") body.innerHTML = renderProfileTab(lastPayload);
-    else if (activeTab === "repos") {
+    if (activeTab === "profile") {
+      body.innerHTML = renderProfileTab(lastPayload);
+      body.querySelector("[data-share-cta]")?.addEventListener("click", copyShareSummary);
+    } else if (activeTab === "repos") {
       body.innerHTML = renderReposTab(lastPayload);
       wireRepoExpands(body);
-    } else if (activeTab === "code") body.innerHTML = renderCodeTab(lastPayload);
-    else body.innerHTML = renderSignalsTab(lastPayload);
+    } else {
+      body.innerHTML = renderAboutTab(lastPayload);
+    }
   }
 
   async function renderSettingsView(body) {
@@ -473,6 +516,17 @@
     return `<span class="pg-kind pg-kind-${escapeAttr(k)}">${label}</span>`;
   }
 
+  function renderKindLegend() {
+    return `
+      <p class="pg-kind-legend">
+        <span class="pg-kind pg-kind-observed">Observed</span> seen in public data
+        <span class="pg-kind-sep">·</span>
+        <span class="pg-kind pg-kind-inferred">Inferred</span> reasoned from patterns
+        <span class="pg-kind-sep">·</span>
+        <span class="pg-kind pg-kind-uncertain">Uncertain</span> can't tell from GitHub alone
+      </p>`;
+  }
+
   function insightItems(items) {
     if (!items?.length) return [];
     return items.map((item) => {
@@ -515,11 +569,12 @@
 
     return `
       <section class="pg-glance pg-anim-in">
+        <p class="pg-glance-kicker">At a glance</p>
         <div class="pg-glance-top">
           <img class="pg-avatar pg-avatar-sm" src="${escapeAttr(user.avatarUrl)}" alt="" width="48" height="48" />
           <div>
             <p class="pg-handle">@${escapeHtml(user.login)}</p>
-            <p class="pg-glance-archetype">${escapeHtml(headline)}</p>
+            <p class="pg-glance-archetype">🧑‍💻 ${escapeHtml(headline)}</p>
           </div>
         </div>
         <p class="pg-glance-label">Strongest signals</p>
@@ -559,6 +614,7 @@
     return `
       <section class="pg-obs-section">
         <h3 class="pg-section-title">Interesting signals</h3>
+        ${renderKindLegend()}
         ${cards}
       </section>`;
   }
@@ -577,6 +633,7 @@
     return `
       <section class="pg-evidence-block pg-anim-fade" style="--pg-i:2">
         <h3 class="pg-section-title">Why we think this</h3>
+        <p class="pg-section-lede">Every conclusion below traces back to public GitHub signals.</p>
         <ul class="pg-evidence">${rows}</ul>
       </section>`;
   }
@@ -616,7 +673,7 @@
     if (!ai) return "";
     return `
       <div class="pg-ai-card pg-anim-fade" style="--pg-i:3">
-        <h4>🤖 AI-assisted development</h4>
+        <h4>AI-assisted development</h4>
         <div class="pg-ai-meta">
           <span>Signal: <strong>${escapeHtml(ai.label || ai.level)}</strong></span>
           <span>Confidence: <strong>${escapeHtml(ai.confidence || "low")}</strong></span>
@@ -627,7 +684,7 @@
             ? `<ul class="pg-ai-evidence">${ai.evidence
                 .map((e) => `<li>${linkPokemonTerms(e)}</li>`)
                 .join("")}</ul>`
-            : ""
+            : `<p class="pg-section-lede" style="margin-top:8px">No strong public tooling markers found. That does not prove AI wasn’t used.</p>`
         }
       </div>`;
   }
@@ -661,17 +718,31 @@
   function renderProfileTab(payload) {
     if (payload.insufficient) return renderInsufficient(payload);
     const { profileScores, summary, observations, evidence } = payload;
+    const repos = payload.analyzedRepos || [];
+    const withTests = repos.filter((r) => r.signals?.hasTests).length;
+    const withCi = repos.filter((r) => r.signals?.hasCi).length;
+
     return `
       ${renderGlance(payload)}
+      <div class="pg-share-bar">
+        <button type="button" class="pg-btn pg-btn-primary pg-btn-share" data-share-cta>Copy profile summary</button>
+        <span class="pg-share-hint">Shareable text · public data only</span>
+      </div>
       ${renderObservations(observations)}
       ${renderEvidenceBlock(evidence)}
       <div class="pg-card pg-anim-fade" style="--pg-i:1">
-        <h3 class="pg-card-title">Full scoreboard</h3>
+        <h3 class="pg-card-title">Engineering scores</h3>
+        <p class="pg-section-lede">Experimental readings of public repo signals — not an ability grade.</p>
         <div class="pg-bars">${renderScoreBars(profileScores)}</div>
+        <div class="pg-activity pg-activity-compact">
+          <div class="pg-activity-row"><span>Repos with tests</span><strong>${withTests}/${repos.length}</strong></div>
+          <div class="pg-activity-row"><span>Repos with CI</span><strong>${withCi}/${repos.length}</strong></div>
+        </div>
         <p class="pg-disclaimer">${escapeHtml(DISCLAIMER)}</p>
       </div>
       <div class="pg-stands pg-anim-fade" style="--pg-i:2">
-        <h3>What stands out</h3>
+        <h3>AI reading</h3>
+        ${renderKindLegend()}
         ${renderInsightBlocks(summary)}
       </div>`;
   }
@@ -684,6 +755,8 @@
       ["Testing", scores.testing],
       ["Maintenance", scores.maintenance],
       ["Complexity", scores.complexity],
+      ["Docs", scores.documentation],
+      ["Activity", scores.activity],
     ]
       .map(
         ([label, v]) => `
@@ -710,7 +783,9 @@
 
     return `
       <div class="pg-drill">
-        <p class="pg-drill-role">${escapeHtml(dd.roleGuess || repo.language || "Project")}</p>
+        <p class="pg-drill-role">${escapeHtml(dd.roleGuess || repo.language || "Project")} · “${escapeHtml(
+      dd.personality || pokemon.personality || pokemon.blurb
+    )}”</p>
         <div class="pg-mini-scores">${scoreRows}</div>
         <div class="pg-drill-why">
           <h4>${escapeHtml(dd.whyTitle || `Why ${pokemon.name}?`)}</h4>
@@ -763,7 +838,9 @@
                 <p class="pg-repo-blurb">${escapeHtml(pokemon.personality || pokemon.blurb)}</p>
                 ${
                   pokemon.why
-                    ? `<p class="pg-repo-why-preview">${escapeHtml(pokemon.why)}</p>`
+                    ? `<p class="pg-repo-why-preview"><span class="pg-why-label">Why ${escapeHtml(
+                        pokemon.name
+                      )}?</span> ${escapeHtml(pokemon.why)}</p>`
                     : ""
                 }
               </div>
@@ -780,6 +857,7 @@
       <p class="pg-meta" style="margin-bottom:10px">
         Showing ${repos.length} of ${payload.repoUniverseSize ?? "?"} owned non-fork repos
         ${payload.forkCount ? ` · ${payload.forkCount} forks excluded` : ""}
+        · tap a row for details
       </p>
       <div class="pg-card pg-repo-card pg-anim-in">${cards}</div>`;
   }
@@ -816,36 +894,27 @@
     });
   }
 
-  function renderCodeTab(payload) {
-    const repos = payload.analyzedRepos || [];
-    const withTests = repos.filter((r) => r.signals?.hasTests).length;
-    const withCi = repos.filter((r) => r.signals?.hasCi).length;
-    const withDocs = repos.filter((r) => r.signals?.hasDocs || r.signals?.hasReadme).length;
-    const langs = (payload.languageSummary || [])
-      .map((l) => `<span class="pg-lang-chip">${escapeHtml(l.name)} <em>${l.percent}%</em></span>`)
-      .join("");
-
+  function renderAboutTab(payload) {
+    const rem = payload?.rateLimitRemaining;
     return `
-      <h3 class="pg-section-title">Code signals</h3>
-      <div class="pg-card pg-anim-in">
-        <div class="pg-activity">
-          <div class="pg-activity-row"><span>Repos with tests</span><strong>${withTests}/${repos.length}</strong></div>
-          <div class="pg-activity-row"><span>Repos with CI</span><strong>${withCi}/${repos.length}</strong></div>
-          <div class="pg-activity-row"><span>Repos with README/docs</span><strong>${withDocs}/${repos.length}</strong></div>
+      <div class="pg-about pg-anim-in">
+        <h3 class="pg-card-title">What PokéGit is</h3>
+        <p class="pg-style">
+          A playful reading of <em>public</em> GitHub signals — not a résumé grade, IQ test, or seniority label.
+          Pokémon are visual shorthand for repository personality, not a game.
+        </p>
+        ${renderPokeLegend()}
+        <div class="pg-card" style="margin-top:16px">
+          <h3 class="pg-card-title">How to read this</h3>
+          ${renderKindLegend()}
+          <ul class="pg-about-list">
+            <li><strong>Observed</strong> — visible in public data (tests, CI, languages, push dates).</li>
+            <li><strong>Inferred</strong> — a reasonable interpretation of those patterns.</li>
+            <li><strong>Uncertain</strong> — public GitHub alone can’t settle it.</li>
+          </ul>
+          <p class="pg-disclaimer">${escapeHtml(DISCLAIMER)}</p>
+          ${rem != null ? `<p class="pg-meta">GitHub API remaining (approx): ${escapeHtml(String(rem))}</p>` : ""}
         </div>
-      </div>
-      <h3 class="pg-section-title">Languages</h3>
-      <div class="pg-langs">${langs || `<span class="pg-empty">No language data</span>`}</div>
-      ${renderEvidenceBlock(payload.evidence || [])}`;
-  }
-
-  function renderSignalsTab(payload) {
-    return `
-      <div class="pg-stands">
-        <h3>Insights</h3>
-        ${renderObservations(payload.observations || [])}
-        ${renderInsightBlocks(payload.summary)}
-        ${renderEvidenceBlock(payload.evidence || [])}
       </div>`;
   }
 

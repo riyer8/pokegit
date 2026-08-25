@@ -172,11 +172,11 @@
 .pg-section-title {
   margin: 0 0 10px;
   font-family: var(--font-display);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--pg-muted);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: var(--pg-ink);
 }
 
 .pg-langs {
@@ -253,6 +253,18 @@
   font-size: 16px;
   line-height: 1;
   font-family: inherit;
+}
+
+.pokegit-icon-btn[data-share] {
+  width: auto;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.pokegit-icon-btn[hidden] {
+  display: none !important;
 }
 
 .pokegit-icon-btn:hover,
@@ -515,6 +527,15 @@
     var(--pg-card);
 }
 
+.pg-glance-kicker {
+  margin: 0 0 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--pg-muted);
+}
+
 .pg-glance-top {
   display: grid;
   grid-template-columns: 48px minmax(0, 1fr);
@@ -580,6 +601,33 @@
   font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.01em;
+}
+
+.pg-section-lede {
+  margin: -4px 0 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--pg-muted);
+}
+
+.pg-kind-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 0 0 12px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--pg-muted);
+}
+
+.pg-kind-sep {
+  opacity: 0.5;
+}
+
+.pg-why-label {
+  font-weight: 700;
+  color: var(--pg-ink-soft);
 }
 
 .pg-obs {
@@ -1457,4 +1505,78 @@
     width: 100vw;
     border-radius: 0;
   }
+}
+
+/* —— Day 3: share + polish —— */
+.pokegit-toast {
+  position: absolute;
+  left: 50%;
+  top: 72px;
+  transform: translateX(-50%) translateY(-6px);
+  z-index: 5;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: var(--pg-ink);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.25);
+}
+
+.pokegit-toast.is-visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.pokegit-panel[data-theme="dark"] .pokegit-toast {
+  background: #e6edf3;
+  color: #0d1117;
+}
+
+.pg-share-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin: -6px 0 18px;
+}
+
+.pg-btn-share {
+  padding: 9px 14px;
+  font-size: 13px;
+}
+
+.pg-share-hint {
+  font-size: 11px;
+  color: var(--pg-muted);
+}
+
+.pg-activity-compact {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--pg-line);
+}
+
+.pg-about-list {
+  margin: 0 0 12px;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--pg-ink-soft);
+}
+
+.pg-about-list li + li {
+  margin-top: 6px;
+}
+
+.pg-glance-archetype {
+  font-size: 15px;
+}
+
+.pokegit-body {
+  scroll-behavior: smooth;
 }

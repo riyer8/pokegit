@@ -109,10 +109,14 @@ export function aggregateProfileScores(analyzedRepos) {
   const totals = Object.fromEntries(dims.map((d) => [d, { w: 0, s: 0 }]));
 
   for (const item of analyzedRepos) {
+    const size = item.repo.size || 0;
+    const stars = item.repo.stargazers || 0;
+    const tiny = size < 20 && stars < 3 ? 0.4 : 1;
     const weight =
-      Math.log10((item.repo.stargazers || 0) + 10) *
+      Math.log10(stars + 10) *
       (item.repo.archived ? 0.4 : 1) *
-      (daysSince(item.repo.pushedAt) < 365 ? 1.2 : 0.85);
+      (daysSince(item.repo.pushedAt) < 365 ? 1.2 : 0.85) *
+      tiny;
     for (const d of dims) {
       totals[d].s += (item.scores[d] || 0) * weight;
       totals[d].w += weight;

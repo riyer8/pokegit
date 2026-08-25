@@ -1,5 +1,6 @@
 import { analyzeProfile, GitHubError } from "./lib/analyze.js";
 import { getKeyStatus, saveStoredKeys, clearStoredKeys } from "./lib/secrets.js";
+import { buildShareText } from "./lib/share.js";
 
 const cache = new Map();
 const CACHE_TTL_MS = 10 * 60 * 1000;
@@ -25,6 +26,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         })
       );
     return true;
+  }
+
+  if (message?.type === "POKEGIT_BUILD_SHARE") {
+    try {
+      const text = buildShareText(message.payload);
+      sendResponse({ ok: true, text });
+    } catch (err) {
+      sendResponse({ ok: false, error: safeError(err) });
+    }
+    return false;
   }
 
   if (message?.type === "POKEGIT_GET_KEY_STATUS") {

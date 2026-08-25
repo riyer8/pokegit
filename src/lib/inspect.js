@@ -33,7 +33,8 @@ const CI_HINTS = [
 const DOC_HINTS = ["readme", "docs", "documentation", "contributing", "wiki"];
 
 /**
- * Rank owned repos for analysis (stars + recency + size). Top N, non-archived preferred.
+ * Rank owned repos for analysis (stars + recency + size).
+ * Tiny / dormant / archived repos get less weight so they don't distort the profile.
  */
 export function selectTopRepos(repos, limit = 8) {
   const now = Date.now();
@@ -48,7 +49,15 @@ export function selectTopRepos(repos, limit = 8) {
       const starScore = Math.log10((r.stargazers || 0) + 1);
       const sizeScore = Math.min(2, Math.log10((r.size || 1) + 1));
       const archivedPenalty = r.archived ? 0.35 : 1;
-      const relevance = (starScore * 2.2 + recency * 3.5 + sizeScore * 0.8) * archivedPenalty;
+      // Tiny stub repos (readme-only / empty) shouldn't dominate
+      const tinyPenalty = (r.size || 0) < 20 && (r.stargazers || 0) < 3 ? 0.45 : 1;
+      // Very dormant (unless starred) fades out of the sample
+      const dormantPenalty = daysSincePush > 900 && (r.stargazers || 0) < 15 ? 0.5 : 1;
+      const relevance =
+        (starScore * 2.2 + recency * 3.5 + sizeScore * 0.8) *
+        archivedPenalty *
+        tinyPenalty *
+        dormantPenalty;
       return { repo: r, relevance };
     })
     .sort((a, b) => b.relevance - a.relevance);

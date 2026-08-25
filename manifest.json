@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "PokéGit",
-  "version": "0.4.0",
-  "description": "PokéGit turns public GitHub profiles into playful engineering profiles with observations, evidence, and Pokémon shorthand.",
+  "version": "0.5.0",
+  "description": "PokéGit — playful, evidence-backed reads of public GitHub profiles. Shareable insights, not ability grades.",
   "permissions": ["storage"],
   "host_permissions": [
     "https://api.github.com/*",

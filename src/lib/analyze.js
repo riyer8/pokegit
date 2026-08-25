@@ -253,7 +253,7 @@ export async function analyzeProfile(username, onProgress = () => {}) {
     summary = emptySummary(insufficientReason);
   }
 
-  const glance = buildGlance(user, profileScores, observations, summary);
+  const glance = buildGlance(user, profileScores, observations, summary, langs);
   return { ...draft, summary, glance };
 }
 

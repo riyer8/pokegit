@@ -206,8 +206,9 @@ export function buildObservations(analyzedRepos, profileScores, languageSummary 
 
 /**
  * At-a-glance headline + strongest dims + one-liner.
+ * Answers: "What kind of engineer is this?"
  */
-export function buildGlance(user, profileScores, observations, summary) {
+export function buildGlance(user, profileScores, observations, summary, languageSummary = []) {
   const ranked = [
     ["testing", "Testing", "🧪"],
     ["architecture", "Architecture", "🏗"],
@@ -220,35 +221,72 @@ export function buildGlance(user, profileScores, observations, summary) {
     .filter((d) => d.score != null)
     .sort((a, b) => b.score - a.score);
 
-  const top3 = ranked.slice(0, 3);
+  // Match the Day-2 mock: show top strengths (prefer the four classic dims when close)
+  const classic = ranked.filter((d) =>
+    ["testing", "architecture", "maintenance", "documentation"].includes(d.key)
+  );
+  const strongest = (classic.length >= 3 ? classic : ranked).slice(0, 4);
+
   const headline =
     summary?.glanceHeadline ||
-    summary?.style ||
-    deriveHeadline(user, profileScores, observations);
+    deriveHeadline(user, profileScores, observations, languageSummary);
 
   const oneLiner =
     summary?.oneLiner ||
-    (observations[0]
-      ? observations[0].title.replace(/^[^ ]+ /, "")
-      : "Public GitHub signals sketch a partial engineering silhouette.");
+    deriveOneLiner(profileScores, observations) ||
+    "Public GitHub signals sketch a partial engineering silhouette.";
 
   return {
     headline,
     oneLiner,
-    strongest: top3,
+    strongest,
     allScores: ranked,
   };
 }
 
-function deriveHeadline(user, scores, observations) {
+function deriveHeadline(user, scores, observations, languageSummary = []) {
+  const langs = (languageSummary || []).map((l) => l.name).filter(Boolean);
   const bits = [];
+
   if ((scores.testing || 0) >= 8) bits.push("test-oriented");
   if ((scores.maintenance || 0) >= 8) bits.push("maintenance-minded");
-  if ((scores.complexity || 0) >= 8) bits.push("complexity-comfortable");
   if ((scores.architecture || 0) >= 8) bits.push("structure-conscious");
-  if (!bits.length && observations[0]) return observations[0].title.replace(/^[^\w]+ /, "") || "Public-work engineer";
-  if (!bits.length) return user?.bio?.split(/[.\n]/)[0]?.trim() || "Public GitHub engineer";
-  return bits.slice(0, 2).join(", ") + " engineer";
+  if ((scores.complexity || 0) >= 8) bits.push("systems-depth");
+  if ((scores.documentation || 0) >= 8) bits.push("docs-aware");
+
+  let stack = "";
+  if (langs.length >= 2) stack = `${langs[0]} / ${langs[1]}`;
+  else if (langs[0]) stack = langs[0];
+
+  if (bits.length && stack) {
+    return `${capitalize(bits[0])} ${stack} engineer`;
+  }
+  if (bits.length >= 2) {
+    return `${capitalize(bits[0])}, ${bits[1]} engineer`;
+  }
+  if (bits.length === 1) {
+    return `${capitalize(bits[0])} engineer`;
+  }
+  if (stack) return `${stack}-focused engineer`;
+  if (observations[0]?.title) {
+    return observations[0].title.replace(/^[^\w]+ /, "").replace(/\.$/, "") || "Public-work engineer";
+  }
+  return user?.bio?.split(/[.\n]/)[0]?.trim() || "Public GitHub engineer";
+}
+
+function deriveOneLiner(scores, observations) {
+  const traits = [];
+  if ((scores.testing || 0) >= 7.5) traits.push("test-oriented");
+  if ((scores.maintenance || 0) >= 7.5) traits.push("highly iterative");
+  if ((scores.architecture || 0) >= 7.5) traits.push("structure-conscious");
+  if (traits.length >= 2) return `Consistent, ${traits[0]} and ${traits[1]}.`;
+  if (traits.length === 1) return `Consistent and ${traits[0]}.`;
+  if (observations[0]?.title) return observations[0].title;
+  return "";
+}
+
+function capitalize(s) {
+  return String(s || "").replace(/^\w/, (c) => c.toUpperCase());
 }
 
 /** Per-repo drill-down payload. */
