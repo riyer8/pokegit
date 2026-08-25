@@ -1,6 +1,7 @@
 import { analyzeProfile, GitHubError } from "./lib/analyze.js";
 import { getKeyStatus, saveStoredKeys, clearStoredKeys } from "./lib/secrets.js";
 import { compareProfiles } from "./lib/compare.js";
+import { buildImprovements } from "./lib/improve.js";
 import {
   getCachedPayload,
   setCachedPayload,
@@ -102,6 +103,18 @@ function safeError(err) {
   return err?.message || "Something went wrong";
 }
 
+function withImprovements(payload) {
+  if (!payload || payload.insufficient) return payload;
+  if (!payload.improvements) {
+    try {
+      payload.improvements = buildImprovements(payload);
+    } catch {
+      /* ignore */
+    }
+  }
+  return payload;
+}
+
 async function handleAnalyze(username, force = false) {
   if (!username || typeof username !== "string") {
     throw new GitHubError("Missing username", 400);
@@ -114,7 +127,11 @@ async function handleAnalyze(username, force = false) {
     if (mem && Date.now() - mem.at < MEMORY_TTL_MS) {
       await rememberAnalysis(mem.payload, { fromCache: true });
       return {
-        payload: { ...mem.payload, fromCache: true, cacheAgeMs: Date.now() - mem.at },
+        payload: {
+          ...withImprovements(mem.payload),
+          fromCache: true,
+          cacheAgeMs: Date.now() - mem.at,
+        },
         fromCache: true,
       };
     }
@@ -124,7 +141,7 @@ async function handleAnalyze(username, force = false) {
       await rememberAnalysis(disk.payload, { fromCache: true });
       return {
         payload: {
-          ...disk.payload,
+          ...withImprovements(disk.payload),
           fromCache: true,
           cacheAgeMs: disk.ageMs,
         },
@@ -134,7 +151,7 @@ async function handleAnalyze(username, force = false) {
   }
 
   const previous = force ? (await getCachedPayload(key))?.payload : null;
-  const payload = await analyzeProfile(key);
+  const payload = withImprovements(await analyzeProfile(key));
   payload.previousAnalyzedAt = previous?.analyzedAt || previous?.fetchedAt || null;
   payload.fromCache = false;
 

@@ -53,8 +53,25 @@
   let repoSort = "interesting";
   let repoLangFilter = "all";
   let repoPokeFilter = "all";
+  let loggedInUser = null;
 
   const state = { fab: null, host: null, shadow: null };
+
+  function detectLoggedInUser() {
+    const meta =
+      document.querySelector('meta[name="user-login"]')?.getAttribute("content") ||
+      document.querySelector('meta[name="octolytics-actor-login"]')?.getAttribute("content");
+    if (meta && meta.trim()) return meta.trim();
+    const fromHref = document.querySelector('a[href^="/"][data-login]')?.getAttribute("data-login");
+    if (fromHref) return fromHref.trim();
+    return null;
+  }
+
+  function isOwnProfile() {
+    loggedInUser = detectLoggedInUser();
+    if (!loggedInUser || !currentUsername) return false;
+    return loggedInUser.toLowerCase() === currentUsername.toLowerCase();
+  }
 
   function parseProfileUsername(pathname = location.pathname) {
     const parts = pathname.split("/").filter(Boolean);
@@ -200,6 +217,9 @@
           <button type="button" class="pokegit-tab" data-tab="compare" role="tab">Compare</button>
           <button type="button" class="pokegit-tab" data-tab="about" role="tab">About</button>
         </nav>
+        <nav class="pokegit-tabs pokegit-tabs-secondary" role="tablist" data-tabs-secondary hidden>
+          <button type="button" class="pokegit-tab pokegit-tab-improve" data-tab="improvements" role="tab">Improvements</button>
+        </nav>
         <div class="pokegit-body" data-body></div>
       </aside>
     `;
@@ -215,7 +235,9 @@
       el.addEventListener("click", () => {
         activeTab = el.getAttribute("data-tab");
         showSettings = false;
-        wrap.querySelectorAll("[data-tab]").forEach((t) => t.classList.toggle("is-active", t === el));
+        wrap.querySelectorAll("[data-tab]").forEach((t) =>
+          t.classList.toggle("is-active", t.getAttribute("data-tab") === activeTab)
+        );
         updateTabsVisibility();
         renderBody();
       });
@@ -264,7 +286,18 @@
 
   function updateTabsVisibility() {
     const tabs = state.shadow?.querySelector("[data-tabs]");
+    const secondary = state.shadow?.querySelector("[data-tabs-secondary]");
     if (tabs) tabs.hidden = showSettings;
+    const own = !showSettings && Boolean(lastPayload) && !lastPayload.insufficient && isOwnProfile();
+    if (secondary) {
+      secondary.hidden = !own;
+      if (!own && activeTab === "improvements") {
+        activeTab = "profile";
+        state.shadow?.querySelectorAll("[data-tab]").forEach((t) =>
+          t.classList.toggle("is-active", t.getAttribute("data-tab") === "profile")
+        );
+      }
+    }
     state.shadow?.querySelector("[data-settings]")?.classList.toggle("is-active", showSettings);
   }
 
@@ -473,6 +506,8 @@
     } else if (activeTab === "compare") {
       body.innerHTML = renderCompareTab(lastPayload);
       wireCompare(body);
+    } else if (activeTab === "improvements" && isOwnProfile()) {
+      body.innerHTML = renderImprovementsTab(lastPayload);
     } else {
       body.innerHTML = renderAboutTab(lastPayload);
     }
@@ -1186,6 +1221,82 @@
         runCompare(false);
       });
     });
+  }
+
+  function renderImprovementsTab(payload) {
+    const pack = payload.improvements;
+    if (!pack?.actions?.length) {
+      return `
+        <div class="pg-improve pg-anim-in">
+          <div class="pg-improve-bg" aria-hidden="true"></div>
+          <div class="pg-improve-inner">
+            <p class="pg-improve-kicker">For @${escapeHtml(payload.user.login)} only</p>
+            <h3 class="pg-improve-title">Improvements</h3>
+            <p class="pg-style">Not enough public signals yet to suggest concrete next steps. Ship a little more in public, then refresh.</p>
+          </div>
+        </div>`;
+    }
+
+    const actions = pack.actions
+      .map(
+        (a, i) => `
+        <article class="pg-improve-card pg-anim-fade" style="--pg-i:${i}">
+          <div class="pg-improve-card-top">
+            <span class="pg-improve-priority pg-priority-${escapeAttr(a.priority)}">${escapeHtml(
+          a.priority
+        )}</span>
+            <h4>${escapeHtml(a.title)}</h4>
+          </div>
+          <p>${escapeHtml(a.why)}</p>
+          <ol class="pg-improve-steps">
+            ${(a.steps || []).map((s) => `<li>${escapeHtml(s)}</li>`).join("")}
+          </ol>
+          ${
+            a.evidence?.length
+              ? `<ul class="pg-evidence">${a.evidence
+                  .map((e) => `<li><span class="pg-check">✓</span>${escapeHtml(e)}</li>`)
+                  .join("")}</ul>`
+              : ""
+          }
+        </article>`
+      )
+      .join("");
+
+    const starters = (pack.starters || [])
+      .map(
+        (s, i) => `
+        <article class="pg-starter-card pg-anim-fade" style="--pg-i:${i + 2}">
+          <div class="pg-starter-emoji" aria-hidden="true">${s.emoji || "✦"}</div>
+          <div>
+            <h4>${escapeHtml(s.title)}</h4>
+            <p>${escapeHtml(s.pitch)}</p>
+            <p class="pg-starter-leap"><strong>Leap from:</strong> ${escapeHtml(s.leapFrom)}</p>
+            <div class="pg-starter-tags">${(s.stack || [])
+              .map((t) => `<span>${escapeHtml(t)}</span>`)
+              .join("")}</div>
+          </div>
+        </article>`
+      )
+      .join("");
+
+    return `
+      <div class="pg-improve pg-anim-in">
+        <div class="pg-improve-bg" aria-hidden="true"></div>
+        <div class="pg-improve-inner">
+          <p class="pg-improve-kicker">Logged in as @${escapeHtml(
+            loggedInUser || payload.user.login
+          )} · your public profile only</p>
+          <h3 class="pg-improve-title">Improvements</h3>
+          <p class="pg-improve-lede">
+            Actionable ways to level up what strangers see. Based on this analysis, not private repos.
+          </p>
+          <h4 class="pg-improve-section">Do these next</h4>
+          <div class="pg-improve-list">${actions}</div>
+          <h4 class="pg-improve-section">Starter projects to leap from</h4>
+          <p class="pg-section-lede">Small public projects you can spin up this week using what you already know.</p>
+          <div class="pg-starter-list">${starters}</div>
+        </div>
+      </div>`;
   }
 
   function renderAboutTab(payload) {

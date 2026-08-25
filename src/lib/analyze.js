@@ -14,6 +14,7 @@ import {
   buildRepoDrilldown,
   buildSurprises,
 } from "./insights.js";
+import { buildImprovements } from "./improve.js";
 
 export { GitHubError };
 
@@ -261,7 +262,8 @@ export async function analyzeProfile(username, onProgress = () => {}) {
   }
 
   const glance = buildGlance(user, profileScores, observations, summary, langs);
-  return { ...draft, summary, glance };
+  const improvements = insufficient ? null : buildImprovements({ ...draft, summary, glance });
+  return { ...draft, summary, glance, improvements };
 }
 
 export async function fetchProfileBundle(username) {
