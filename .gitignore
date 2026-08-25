@@ -1,0 +1,16 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Generated from .env for local extension testing — contains live keys
+src/lib/secrets.local.js
+**/secrets.local.js
+
+# OS / editor
+.DS_Store
+*.log
+.idea/
+.vscode/

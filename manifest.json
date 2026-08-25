@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "PokéGit",
+  "version": "0.2.0",
+  "description": "Analyze a GitHub profile into engineering scores, Pokémon repo cards, and a short summary.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://api.github.com/*",
+    "https://github.com/*",
+    "https://api.openai.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://github.com/*"],
+      "js": ["src/content/content.js"],
+      "css": ["src/content/content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/panel/panel.css",
+        "src/panel/fonts.css",
+        "src/panel/fonts/*",
+        "icons/*"
+      ],
+      "matches": ["https://github.com/*"]
+    }
+  ],
+  "action": {
+    "default_title": "PokéGit",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

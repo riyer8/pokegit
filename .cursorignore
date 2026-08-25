@@ -1,0 +1,5 @@
+# Keep secrets out of the editor index / agent context when possible
+.env
+.env.*
+src/lib/secrets.local.js
+**/secrets.local.js
