@@ -1,4 +1,5 @@
 import { analyzeProfile, GitHubError } from "./lib/analyze.js";
+import { analyzeRepoPage } from "./lib/repo-page.js";
 import { getKeyStatus, saveStoredKeys, clearStoredKeys } from "./lib/secrets.js";
 import { compareProfiles } from "./lib/compare.js";
 import { buildImprovements } from "./lib/improve.js";
@@ -28,6 +29,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           ok: false,
           error: {
             message: err.message || "Failed to analyze profile",
+            status: err.status || 0,
+            rateLimitRemaining: err.rateLimitRemaining ?? null,
+          },
+        })
+      );
+    return true;
+  }
+
+  if (message?.type === "POKEGIT_ANALYZE_REPO") {
+    handleAnalyzeRepo(message.owner, message.repo, Boolean(message.force))
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((err) =>
+        sendResponse({
+          ok: false,
+          error: {
+            message: err.message || "Failed to analyze repository",
             status: err.status || 0,
             rateLimitRemaining: err.rateLimitRemaining ?? null,
           },
@@ -158,6 +175,41 @@ async function handleAnalyze(username, force = false) {
   memoryCache.set(key, { at: Date.now(), payload });
   await setCachedPayload(key, payload);
   await rememberAnalysis(payload, { fromCache: false });
+
+  return { payload, fromCache: false, cacheTtlMs: PERSIST_TTL_MS };
+}
+
+async function handleAnalyzeRepo(owner, repo, force = false) {
+  if (!owner || !repo || typeof owner !== "string" || typeof repo !== "string") {
+    throw new GitHubError("Missing owner/repo", 400);
+  }
+  const key = `repo:${owner}/${repo}`.toLowerCase();
+
+  if (!force) {
+    const mem = memoryCache.get(key);
+    if (mem && Date.now() - mem.at < MEMORY_TTL_MS) {
+      return {
+        payload: { ...mem.payload, fromCache: true, cacheAgeMs: Date.now() - mem.at },
+        fromCache: true,
+      };
+    }
+    const disk = await getCachedPayload(key);
+    if (disk?.payload) {
+      memoryCache.set(key, { at: disk.at, payload: disk.payload });
+      return {
+        payload: { ...disk.payload, fromCache: true, cacheAgeMs: disk.ageMs },
+        fromCache: true,
+      };
+    }
+  }
+
+  const previous = force ? (await getCachedPayload(key))?.payload : null;
+  const payload = await analyzeRepoPage(owner, repo);
+  payload.previousAnalyzedAt = previous?.analyzedAt || previous?.fetchedAt || null;
+  payload.fromCache = false;
+
+  memoryCache.set(key, { at: Date.now(), payload });
+  await setCachedPayload(key, payload);
 
   return { payload, fromCache: false, cacheTtlMs: PERSIST_TTL_MS };
 }

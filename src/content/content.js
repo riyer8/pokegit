@@ -36,7 +36,10 @@
   const DISCLAIMER =
     "Experimental score based on publicly observable repository signals. Not an objective assessment of engineering ability.";
 
+  let pageMode = null; // "profile" | "repo" | null
   let currentUsername = null;
+  let currentOwner = null;
+  let currentRepo = null;
   let panelOpen = false;
   let lastPayload = null;
   let lastError = null;
@@ -55,7 +58,77 @@
   let repoPokeFilter = "all";
   let loggedInUser = null;
 
+  const NON_REPO_SECONDS = new Set([
+    "followers", "following", "stars", "packages", "projects", "sponsors",
+    "repositories", "achievements", "overview", "discussions", "pulse",
+    "security", "settings", "wiki",
+  ]);
+
   const state = { fab: null, host: null, shadow: null };
+  let contextDead = false;
+
+  /** False after the extension is reloaded/disabled while this tab stays open. */
+  function extensionAlive() {
+    try {
+      return Boolean(chrome?.runtime?.id);
+    } catch {
+      return false;
+    }
+  }
+
+  function markContextDead() {
+    if (contextDead) return;
+    contextDead = true;
+    panelOpen = false;
+    try {
+      if (state.fab) {
+        state.fab.remove();
+        state.fab = null;
+      }
+    } catch {
+      state.fab = null;
+    }
+    try {
+      if (state.host) {
+        state.host.remove();
+        state.host = null;
+        state.shadow = null;
+      }
+    } catch {
+      state.host = null;
+      state.shadow = null;
+    }
+  }
+
+  function extUrl(path) {
+    if (!extensionAlive()) {
+      markContextDead();
+      return null;
+    }
+    try {
+      return chrome.runtime.getURL(path);
+    } catch {
+      markContextDead();
+      return null;
+    }
+  }
+
+  async function extSend(message) {
+    if (!extensionAlive()) {
+      markContextDead();
+      throw new Error("PokéGit was reloaded. Refresh this GitHub tab, then try again.");
+    }
+    try {
+      return await chrome.runtime.sendMessage(message);
+    } catch (err) {
+      const msg = String(err?.message || err || "");
+      if (/extension context invalidated|receiving end does not exist/i.test(msg)) {
+        markContextDead();
+        throw new Error("PokéGit was reloaded. Refresh this GitHub tab, then try again.");
+      }
+      throw err;
+    }
+  }
 
   function detectLoggedInUser() {
     const meta =
@@ -82,6 +155,49 @@
     return candidate;
   }
 
+  function parseRepoContext(pathname = location.pathname) {
+    const parts = pathname.split("/").filter(Boolean);
+    if (parts.length < 2) return null;
+    const [owner, repo] = parts;
+    if (RESERVED.has(owner.toLowerCase())) return null;
+    if (NON_REPO_SECONDS.has(repo.toLowerCase())) return null;
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/.test(owner)) return null;
+    if (!/^[A-Za-z0-9._-]+$/.test(repo)) return null;
+    return { owner, repo };
+  }
+
+  function parsePageContext() {
+    const username = parseProfileUsername();
+    if (username) return { mode: "profile", username, owner: null, repo: null };
+
+    // Profile subpaths that are not repositories (followers, stars, etc.)
+    const parts = location.pathname.split("/").filter(Boolean);
+    if (
+      parts.length === 2 &&
+      NON_REPO_SECONDS.has(parts[1].toLowerCase()) &&
+      !RESERVED.has(parts[0].toLowerCase()) &&
+      /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/.test(parts[0])
+    ) {
+      return { mode: "profile", username: parts[0], owner: null, repo: null };
+    }
+
+    const r = parseRepoContext();
+    if (r) return { mode: "repo", username: null, owner: r.owner, repo: r.repo };
+    return { mode: null, username: null, owner: null, repo: null };
+  }
+
+  function canAnalyze() {
+    if (pageMode === "profile") return Boolean(currentUsername);
+    if (pageMode === "repo") return Boolean(currentOwner && currentRepo);
+    return false;
+  }
+
+  function contextKey(ctx = { mode: pageMode, username: currentUsername, owner: currentOwner, repo: currentRepo }) {
+    if (ctx.mode === "profile") return `profile:${(ctx.username || "").toLowerCase()}`;
+    if (ctx.mode === "repo") return `repo:${(ctx.owner || "").toLowerCase()}/${(ctx.repo || "").toLowerCase()}`;
+    return "none";
+  }
+
   function escapeHtml(value) {
     return String(value ?? "")
       .replace(/&/g, "&amp;")
@@ -94,17 +210,42 @@
     return escapeHtml(value).replace(/'/g, "&#39;");
   }
 
+  /**
+   * Escape HTML, then render a safe subset of inline markdown
+   * (bold, italic, code, links). Optionally highlight Pokémon names.
+   */
+  function formatRichText(text, { poke = false } = {}) {
+    let s = escapeHtml(text);
+    // Links: [label](url) — only http(s)
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, label, url) => {
+      return `<a class="pg-md-link" href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+    });
+    // Inline code
+    s = s.replace(/`([^`]+)`/g, '<code class="pg-md-code">$1</code>');
+    // Bold
+    s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    s = s.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+    // Italic
+    s = s.replace(/(^|[^*])\*([^*]+)\*([^*]|$)/g, "$1<em>$2</em>$3");
+    s = s.replace(/(^|[^_])_([^_]+)_([^_]|$)/g, "$1<em>$2</em>$3");
+    // Stray heading markers left in prose
+    s = s.replace(/^#{1,6}\s+/gm, "");
+    if (poke) {
+      const names = POKE_LEGEND.map((p) => p.name).sort((a, b) => b.length - a.length);
+      const re = new RegExp(`\\b(${names.join("|")})\\b`, "g");
+      s = s.replace(re, (match) => {
+        const p = POKE_BY_NAME[match];
+        if (!p) return match;
+        const tip = `${p.emoji} ${p.name}: ${p.personality || p.meaning}`;
+        return `<span class="pg-poke-term" tabindex="0"><span class="pg-poke-term-label">${match}</span><span class="pg-tip" role="tooltip">${escapeHtml(tip)}</span></span>`;
+      });
+    }
+    return s;
+  }
+
   /** Escape text, then wrap Pokémon codewords with colored hover tips. */
   function linkPokemonTerms(text) {
-    const escaped = escapeHtml(text);
-    const names = POKE_LEGEND.map((p) => p.name).sort((a, b) => b.length - a.length);
-    const re = new RegExp(`\\b(${names.join("|")})\\b`, "g");
-    return escaped.replace(re, (match) => {
-      const p = POKE_BY_NAME[match];
-      if (!p) return match;
-      const tip = `${p.emoji} ${p.name}: ${p.personality || p.meaning}`;
-      return `<span class="pg-poke-term" tabindex="0"><span class="pg-poke-term-label">${match}</span><span class="pg-tip" role="tooltip">${escapeHtml(tip)}</span></span>`;
-    });
+    return formatRichText(text, { poke: true });
   }
 
   function renderPokeLegend() {
@@ -150,7 +291,11 @@
 
   /** Small FAB only — never mounts the overlay until the user opens the panel. */
   function ensureFab() {
-    if (state.fab) return;
+    if (state.fab || contextDead) return;
+    if (!extensionAlive()) {
+      markContextDead();
+      return;
+    }
 
     const fab = document.createElement("button");
     fab.id = "pokegit-fab";
@@ -161,6 +306,10 @@
     fab.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
+      if (!extensionAlive()) {
+        markContextDead();
+        return;
+      }
       openPanel(false);
     });
     document.documentElement.appendChild(fab);
@@ -170,12 +319,20 @@
   /** Full panel overlay — created lazily on first open. */
   function ensurePanel() {
     if (state.host) return;
+    if (!extensionAlive()) {
+      markContextDead();
+      return;
+    }
+
+    const fontsUrl = extUrl("src/panel/fonts.css");
+    const cssUrl = extUrl("src/panel/panel.css");
+    if (!fontsUrl || !cssUrl) return;
 
     if (!document.getElementById("pokegit-font-link")) {
       const fabFonts = document.createElement("link");
       fabFonts.id = "pokegit-font-link";
       fabFonts.rel = "stylesheet";
-      fabFonts.href = chrome.runtime.getURL("src/panel/fonts.css");
+      fabFonts.href = fontsUrl;
       document.documentElement.appendChild(fabFonts);
     }
 
@@ -188,12 +345,12 @@
 
     const style = document.createElement("link");
     style.rel = "stylesheet";
-    style.href = chrome.runtime.getURL("src/panel/panel.css");
+    style.href = cssUrl;
     shadow.appendChild(style);
 
     const fonts = document.createElement("link");
     fonts.rel = "stylesheet";
-    fonts.href = chrome.runtime.getURL("src/panel/fonts.css");
+    fonts.href = fontsUrl;
     shadow.appendChild(fonts);
 
     const wrap = document.createElement("div");
@@ -204,7 +361,7 @@
         <header class="pokegit-header">
           <div>
             <div class="pokegit-brand-name">Poké<span>Git</span></div>
-            <div class="pokegit-brand-sub">a chrome extension that analyzes public github profiles.</div>
+            <div class="pokegit-brand-sub" data-brand-sub>a chrome extension that analyzes public github profiles.</div>
           </div>
           <div class="pokegit-header-actions">
             <button type="button" class="pokegit-icon-btn" data-settings title="Settings" aria-label="Settings">⚙</button>
@@ -212,10 +369,11 @@
           </div>
         </header>
         <nav class="pokegit-tabs" role="tablist" data-tabs>
-          <button type="button" class="pokegit-tab is-active" data-tab="profile" role="tab">Profile</button>
-          <button type="button" class="pokegit-tab" data-tab="repos" role="tab">Repos</button>
-          <button type="button" class="pokegit-tab" data-tab="compare" role="tab">Compare</button>
-          <button type="button" class="pokegit-tab" data-tab="about" role="tab">About</button>
+          <button type="button" class="pokegit-tab is-active" data-tab="profile" data-mode="profile" role="tab">Profile</button>
+          <button type="button" class="pokegit-tab" data-tab="repos" data-mode="profile" role="tab">Repos</button>
+          <button type="button" class="pokegit-tab" data-tab="compare" data-mode="profile" role="tab">Compare</button>
+          <button type="button" class="pokegit-tab" data-tab="overview" data-mode="repo" role="tab" hidden>Overview</button>
+          <button type="button" class="pokegit-tab" data-tab="about" data-mode="both" role="tab">About</button>
         </nav>
         <nav class="pokegit-tabs pokegit-tabs-secondary" role="tablist" data-tabs-secondary hidden>
           <button type="button" class="pokegit-tab pokegit-tab-improve" data-tab="improvements" role="tab">Improvements</button>
@@ -284,30 +442,62 @@
     state.shadow = shadow;
   }
 
+  function updateBrandCopy() {
+    const sub = state.shadow?.querySelector("[data-brand-sub]");
+    if (!sub) return;
+    sub.textContent =
+      pageMode === "repo"
+        ? "a chrome extension that analyzes public github repositories."
+        : "a chrome extension that analyzes public github profiles.";
+  }
+
+  function defaultTabForMode() {
+    return pageMode === "repo" ? "overview" : "profile";
+  }
+
   function updateTabsVisibility() {
     const tabs = state.shadow?.querySelector("[data-tabs]");
     const secondary = state.shadow?.querySelector("[data-tabs-secondary]");
-    if (tabs) tabs.hidden = showSettings;
-    const own = !showSettings && Boolean(lastPayload) && !lastPayload.insufficient && isOwnProfile();
+    if (tabs) {
+      tabs.hidden = showSettings;
+      tabs.querySelectorAll("[data-tab]").forEach((t) => {
+        const mode = t.getAttribute("data-mode") || "both";
+        let visible = !showSettings;
+        if (mode === "profile") visible = visible && pageMode === "profile";
+        else if (mode === "repo") visible = visible && pageMode === "repo";
+        t.hidden = !visible;
+        t.classList.toggle("is-active", visible && t.getAttribute("data-tab") === activeTab);
+      });
+    }
+    const own =
+      !showSettings &&
+      pageMode === "profile" &&
+      Boolean(lastPayload) &&
+      !lastPayload.insufficient &&
+      isOwnProfile();
     if (secondary) {
       secondary.hidden = !own;
       if (!own && activeTab === "improvements") {
-        activeTab = "profile";
-        state.shadow?.querySelectorAll("[data-tab]").forEach((t) =>
-          t.classList.toggle("is-active", t.getAttribute("data-tab") === "profile")
-        );
+        activeTab = defaultTabForMode();
       }
     }
     state.shadow?.querySelector("[data-settings]")?.classList.toggle("is-active", showSettings);
+    updateBrandCopy();
   }
 
   function openPanel(forceRefresh = false) {
-    if (!currentUsername) return;
+    if (!canAnalyze() || contextDead) return;
+    if (!extensionAlive()) {
+      markContextDead();
+      return;
+    }
     ensurePanel();
+    if (!state.host) return;
     panelOpen = true;
     showSettings = false;
-    activeTab = "profile";
+    activeTab = defaultTabForMode();
     applyTheme();
+    updateBrandCopy();
 
     state.host.hidden = false;
     state.host.style.display = "block";
@@ -317,9 +507,6 @@
       state.shadow.querySelector(".pokegit-backdrop")?.classList.add("is-open");
       state.shadow.querySelector(".pokegit-panel")?.classList.add("is-open");
     });
-    state.shadow.querySelectorAll("[data-tab]").forEach((t) => {
-      t.classList.toggle("is-active", t.getAttribute("data-tab") === "profile");
-    });
     updateTabsVisibility();
     if (forceRefresh || (!lastPayload && !loading)) analyze(Boolean(forceRefresh));
     else renderBody();
@@ -327,21 +514,25 @@
 
   function closePanel() {
     panelOpen = false;
-    if (!state.host || !state.shadow) return;
-    state.shadow.querySelector(".pokegit-backdrop")?.classList.remove("is-open");
-    state.shadow.querySelector(".pokegit-panel")?.classList.remove("is-open");
-    state.host.style.pointerEvents = "none";
+    const host = state.host;
+    const shadow = state.shadow;
+    if (!host || !shadow) return;
+    shadow.querySelector(".pokegit-backdrop")?.classList.remove("is-open");
+    shadow.querySelector(".pokegit-panel")?.classList.remove("is-open");
+    host.style.pointerEvents = "none";
     // fully detach overlay from paint after close animation
     window.setTimeout(() => {
       if (panelOpen) return;
-      state.host.hidden = true;
-      state.host.style.display = "none";
+      // Host may have been torn down (reload / navigation) while the timer was pending.
+      if (state.host !== host) return;
+      host.hidden = true;
+      host.style.display = "none";
     }, 280);
   }
 
   async function refreshKeyStatus() {
     try {
-      const res = await chrome.runtime.sendMessage({ type: "POKEGIT_GET_KEY_STATUS" });
+      const res = await extSend({ type: "POKEGIT_GET_KEY_STATUS" });
       if (res?.ok) keyStatus = res.status;
     } catch {
       keyStatus = null;
@@ -350,7 +541,7 @@
 
   async function refreshHistory() {
     try {
-      const res = await chrome.runtime.sendMessage({ type: "POKEGIT_GET_HISTORY" });
+      const res = await extSend({ type: "POKEGIT_GET_HISTORY" });
       if (res?.ok) historyList = res.history || [];
     } catch {
       /* ignore */
@@ -370,7 +561,7 @@
   }
 
   async function analyze(force = true) {
-    if (!currentUsername) return;
+    if (!canAnalyze()) return;
     loading = true;
     lastError = null;
     showSettings = false;
@@ -379,11 +570,19 @@
     renderBody();
 
     try {
-      const response = await chrome.runtime.sendMessage({
-        type: "POKEGIT_ANALYZE_PROFILE",
-        username: currentUsername,
-        force: Boolean(force),
-      });
+      const response =
+        pageMode === "repo"
+          ? await extSend({
+              type: "POKEGIT_ANALYZE_REPO",
+              owner: currentOwner,
+              repo: currentRepo,
+              force: Boolean(force),
+            })
+          : await extSend({
+              type: "POKEGIT_ANALYZE_PROFILE",
+              username: currentUsername,
+              force: Boolean(force),
+            });
       if (!response?.ok) {
         throw Object.assign(new Error(response?.error?.message || "Analyze failed"), response?.error || {});
       }
@@ -415,7 +614,7 @@
     compareError = null;
     renderBody();
     try {
-      const res = await chrome.runtime.sendMessage({
+      const res = await extSend({
         type: "POKEGIT_COMPARE_PROFILES",
         leftUsername: currentUsername,
         rightUsername: right,
@@ -446,16 +645,25 @@
     }
 
     if (loading) {
+      const subject =
+        pageMode === "repo"
+          ? `${escapeHtml(currentOwner)}/${escapeHtml(currentRepo)}`
+          : `@${escapeHtml(currentUsername)}`;
+      const steps =
+        pageMode === "repo"
+          ? `<li class="is-on">Fetching repository metadata</li>
+            <li class="is-on">Reading README &amp; root layout</li>
+            <li class="is-pulse">Scoring structure, tests &amp; AI signals</li>
+            <li>Writing the breakdown</li>`
+          : `<li class="is-on">Fetching public profile</li>
+            <li class="is-on">Inspecting top repositories</li>
+            <li class="is-pulse">Scoring signals &amp; assigning Pokémon</li>
+            <li>Writing observations</li>`;
       body.innerHTML = `
         <div class="pg-state pg-loading-state">
           <div class="pg-pokeball-load" aria-hidden="true"></div>
-          <h3>Analyzing @${escapeHtml(currentUsername)}</h3>
-          <ul class="pg-load-steps">
-            <li class="is-on">Fetching public profile</li>
-            <li class="is-on">Inspecting top repositories</li>
-            <li class="is-pulse">Scoring signals &amp; assigning Pokémon</li>
-            <li>Writing observations</li>
-          </ul>
+          <h3>Analyzing ${subject}</h3>
+          <ul class="pg-load-steps">${steps}</ul>
         </div>`;
       return;
     }
@@ -463,13 +671,16 @@
     if (lastError) {
       const rateLimited = lastError.status === 403 || lastError.status === 429;
       const notFound = lastError.status === 404;
+      const subject = pageMode === "repo" ? "repository" : "profile";
       body.innerHTML = `
         <div class="pg-state pg-error-state">
           <div class="pg-error-mark" aria-hidden="true">!</div>
-          <h3>Couldn't analyze this profile</h3>
+          <h3>Couldn't analyze this ${subject}</h3>
           <p>${escapeHtml(
         notFound
-          ? "Invalid or missing GitHub profile."
+          ? pageMode === "repo"
+            ? "Repository not found, private, or unavailable via the public API."
+            : "Invalid or missing GitHub profile."
           : lastError.message || "Try again."
       )}</p>
           ${rateLimited ? `<p>GitHub rate limit hit. Add a token in Settings.</p>` : ""}
@@ -478,7 +689,7 @@
             <button type="button" class="pg-btn pg-btn-ghost" data-goto-settings>Settings</button>
           </div>
         </div>`;
-      body.querySelector("[data-retry]")?.addEventListener("click", analyze);
+      body.querySelector("[data-retry]")?.addEventListener("click", () => analyze(true));
       body.querySelector("[data-goto-settings]")?.addEventListener("click", () => {
         showSettings = true;
         renderBody();
@@ -493,6 +704,16 @@
 
     if (lastPayload.insufficient) {
       body.innerHTML = renderInsufficient(lastPayload);
+      return;
+    }
+
+    if (pageMode === "repo" || lastPayload.mode === "repo") {
+      if (activeTab === "about") {
+        body.innerHTML = renderAboutTab(lastPayload);
+      } else {
+        body.innerHTML = renderRepoOverview(lastPayload);
+        body.querySelector("[data-refresh]")?.addEventListener("click", () => analyze(true));
+      }
       return;
     }
 
@@ -556,7 +777,7 @@
       renderBody();
     });
     body.querySelector("[data-clear]")?.addEventListener("click", async () => {
-      const res = await chrome.runtime.sendMessage({ type: "POKEGIT_CLEAR_KEYS" });
+      const res = await extSend({ type: "POKEGIT_CLEAR_KEYS" });
       if (res?.ok) keyStatus = res.status;
       renderSettingsView(body);
     });
@@ -567,7 +788,7 @@
       const payload = {};
       if (!ghLocked && githubInput) payload.githubToken = githubInput.value;
       if (!oaLocked && openaiInput) payload.openaiApiKey = openaiInput.value;
-      const res = await chrome.runtime.sendMessage({ type: "POKEGIT_SAVE_KEYS", ...payload });
+      const res = await extSend({ type: "POKEGIT_SAVE_KEYS", ...payload });
       if (!res?.ok) {
         if (msg) {
           msg.style.color = "#a12a0a";
@@ -622,55 +843,109 @@
     });
   }
 
+  function scoreTone(score) {
+    if (score == null || Number.isNaN(Number(score))) return "muted";
+    const v = Number(score);
+    if (v >= 7.5) return "good";
+    if (v >= 5) return "mid";
+    return "thin";
+  }
+
+  function renderScorePills(scores, limit = 4) {
+    const rows = SCORE_ROWS.map(([label, key, icon]) => ({
+      label,
+      key,
+      icon,
+      score: scores?.[key],
+    }))
+      .filter((d) => d.score != null)
+      .sort((a, b) => Number(b.score) - Number(a.score))
+      .slice(0, limit);
+
+    if (!rows.length) return "";
+    return `
+      <div class="pg-pills">
+        ${rows
+          .map(
+            (d) => `
+          <span class="pg-pill pg-pill-${scoreTone(d.score)}">
+            <span class="pg-pill-icon" aria-hidden="true">${d.icon}</span>
+            <span class="pg-pill-label">${escapeHtml(d.label)}</span>
+            <strong>${Number(d.score).toFixed(1)}</strong>
+          </span>`
+          )
+          .join("")}
+      </div>`;
+  }
+
+  function renderSnapChips(chips = []) {
+    if (!chips.length) return "";
+    return `
+      <div class="pg-snaps">
+        ${chips
+          .map(
+            (c) => `
+          <span class="pg-snap pg-snap-${escapeAttr(c.tone || "muted")}">
+            <span class="pg-snap-k">${escapeHtml(c.label)}</span>
+            <strong>${escapeHtml(c.value)}</strong>
+          </span>`
+          )
+          .join("")}
+      </div>`;
+  }
+
+  function renderHighlightItems(items, emptyText) {
+    const list = insightItems(items).slice(0, 5);
+    if (!list.length) {
+      return emptyText ? `<p class="pg-section-lede">${escapeHtml(emptyText)}</p>` : "";
+    }
+    return `
+      <ul class="pg-highlight-list">
+        ${list
+          .map(
+            (i) => `
+          <li>
+            <span class="pg-highlight-text">${linkPokemonTerms(i.text)}</span>
+            ${kindBadge(i.kind)}
+          </li>`
+          )
+          .join("")}
+      </ul>`;
+  }
+
   function renderGlance(payload) {
     const user = payload.user;
     const glance = payload.glance || {};
     const summary = payload.summary || {};
-    const oneLiner = glance.oneLiner || summary.oneLiner || summary.style || "";
-    const strongest = glance.strongest?.length
-      ? glance.strongest
-      : SCORE_ROWS.slice(0, 4).map(([label, key, icon]) => ({
-          label,
-          key,
-          icon,
-          score: payload.profileScores?.[key],
-        }));
-
-    const bars = strongest
-      .filter((d) => d.score != null)
-      .map((d, i) => {
-        const v = Math.max(0, Math.min(10, d.score));
-        return `
-          <div class="pg-bar-row pg-anim-bar" style="--pg-i:${i}">
-            <div class="pg-bar-label">${d.icon} ${escapeHtml(d.label)}</div>
-            <div class="pg-bar-track"><div class="pg-bar-fill" style="width:${v * 10}%"></div></div>
-            <div class="pg-bar-val">${v.toFixed(1)}</div>
-          </div>`;
-      })
-      .join("");
+    const headline =
+      glance.headline || summary.glanceHeadline || user.name || `@${user.login}`;
+    const oneLiner = (glance.oneLiner || summary.oneLiner || summary.style || "")
+      .replace(/^["“]|["”]$/g, "");
+    const scores = payload.profileScores || {};
 
     return `
       <section class="pg-glance pg-anim-in">
-        <p class="pg-glance-kicker">At a glance</p>
         <div class="pg-glance-top">
           <img class="pg-avatar pg-avatar-sm" src="${escapeAttr(user.avatarUrl)}" alt="" width="48" height="48" />
-          <div>
+          <div class="pg-glance-id">
             <p class="pg-handle">@${escapeHtml(user.login)}</p>
+            <p class="pg-glance-archetype">${escapeHtml(headline)}</p>
           </div>
         </div>
-        <p class="pg-glance-label">Strongest signals</p>
-        <div class="pg-bars pg-glance-bars">${bars}</div>
         ${
           oneLiner
-            ? `<p class="pg-glance-quote">“${escapeHtml(oneLiner.replace(/^["“]|["”]$/g, ""))}”</p>`
+            ? `<p class="pg-takeaway">${formatRichText(oneLiner)}</p>`
             : ""
         }
+        <p class="pg-glance-label">Strongest public signals</p>
+        ${renderScorePills(scores, 4)}
       </section>`;
   }
 
-  function renderObservations(observations = []) {
-    if (!observations.length) return "";
-    const cards = observations
+  function renderObservations(observations = [], opts = {}) {
+    const list = (observations || []).slice(0, opts.limit || 4);
+    if (!list.length) return "";
+    const cards = list
       .map(
         (o, i) => `
         <article class="pg-obs pg-anim-fade" style="--pg-i:${i}">
@@ -682,19 +957,25 @@
             </div>
           </div>
           <p>${linkPokemonTerms(o.body)}</p>
-          ${o.evidence?.length
-            ? `<ul class="pg-evidence">${o.evidence
-              .map((e) => `<li><span class="pg-check">✓</span>${escapeHtml(e)}</li>`)
-              .join("")}</ul>`
-            : ""
+          ${
+            o.evidence?.length
+              ? `<details class="pg-mini-details">
+                  <summary>Evidence</summary>
+                  <ul class="pg-evidence">${o.evidence
+                    .map((e) => `<li><span class="pg-check">✓</span>${escapeHtml(e)}</li>`)
+                    .join("")}</ul>
+                </details>`
+              : ""
           }
         </article>`
       )
       .join("");
     return `
-      <section class="pg-obs-section">
-        <h3 class="pg-section-title">Interesting signals</h3>
-        ${renderKindLegend()}
+      <section class="pg-block pg-obs-section">
+        <h3 class="pg-section-title">${escapeHtml(opts.title || "What stands out")}</h3>
+        <p class="pg-section-lede">${escapeHtml(
+          opts.lede || "The highest-signal patterns across the public sample."
+        )}</p>
         ${cards}
       </section>`;
   }
@@ -711,82 +992,293 @@
       )
       .join("");
     return `
-      <section class="pg-evidence-block pg-anim-fade" style="--pg-i:2">
-        <h3 class="pg-section-title">Why we think this</h3>
-        <p class="pg-section-lede">Every conclusion below traces back to public GitHub signals.</p>
+      <details class="pg-details pg-anim-fade" style="--pg-i:2">
+        <summary>Signal checklist</summary>
+        <p class="pg-section-lede">Raw public checks behind the reading above.</p>
         <ul class="pg-evidence">${rows}</ul>
-      </section>`;
+      </details>`;
   }
 
   function renderLabeledList(title, items, cls, mark) {
     const list = insightItems(items);
-    const empty = !list.length
-      ? `<li><div class="pg-flag-item"><span class="pg-flag-empty">Nothing clear enough to flag from public signals.</span></div></li>`
-      : "";
+    if (!list.length) return "";
     return `
       <div class="pg-flag-col ${cls}">
         <h4>${title}</h4>
-        <ul>
-          ${
-            list.length
-              ? list
-                  .map(
-                    (i) => `
+        <ul class="pg-highlight-list">
+          ${list
+            .slice(0, 5)
+            .map(
+              (i) => `
             <li>
-              <div class="pg-flag-item">
-                <div class="pg-flag-item-top">
-                  <span class="pg-flag-mark" aria-hidden="true">${mark}</span>
-                  ${kindBadge(i.kind)}
-                  <span>${linkPokemonTerms(i.text)}</span>
-                </div>
-                ${
-                  i.evidence?.length
-                    ? `<ul class="pg-evidence pg-evidence-tight">${i.evidence
-                        .map((e) => `<li><span class="pg-check">✓</span>${escapeHtml(e)}</li>`)
-                        .join("")}</ul>`
-                    : ""
-                }
-              </div>
+              <span class="pg-flag-mark" aria-hidden="true">${mark}</span>
+              <span class="pg-highlight-text">${linkPokemonTerms(i.text)}</span>
+              ${kindBadge(i.kind)}
             </li>`
-                  )
-                  .join("")
-              : empty
-          }
+            )
+            .join("")}
         </ul>
       </div>`;
   }
 
   function renderAiCard(ai) {
     if (!ai) return "";
+    const level = String(ai.label || ai.level || "none");
+    const tone =
+      /high/i.test(level) ? "mid" : /low|none/i.test(level) ? "muted" : "mid";
     return `
-      <div class="pg-ai-card pg-anim-fade" style="--pg-i:3">
-        <h4>AI-assisted development</h4>
-        <div class="pg-ai-meta">
-          <span>Signal: <strong>${escapeHtml(ai.label || ai.level)}</strong></span>
-          <span>Confidence: <strong>${escapeHtml(ai.confidence || "low")}</strong></span>
+      <section class="pg-block pg-ai-card pg-anim-fade" style="--pg-i:3">
+        <div class="pg-ai-head">
+          <h3 class="pg-section-title">AI tooling signal</h3>
+          <span class="pg-pill pg-pill-${tone}"><strong>${escapeHtml(level)}</strong></span>
         </div>
-        <p>${linkPokemonTerms(ai.summary || "")}</p>
+        <p class="pg-meta">Confidence: ${escapeHtml(ai.confidence || "low")} · never a % of code</p>
+        <p class="pg-prose">${linkPokemonTerms(ai.summary || "")}</p>
         ${
           ai.evidence?.length
             ? `<ul class="pg-ai-evidence">${ai.evidence
                 .map((e) => `<li>${linkPokemonTerms(e)}</li>`)
                 .join("")}</ul>`
-            : `<p class="pg-section-lede" style="margin-top:8px">No strong public tooling markers found. That does not prove AI wasn’t used.</p>`
+            : `<p class="pg-section-lede">No strong public tooling markers. That does not prove AI was unused.</p>`
         }
+      </section>`;
+  }
+
+  function renderRepoOverview(payload) {
+    const repo = payload.repo || {};
+    const pokemon = payload.pokemon || {};
+    const about = payload.about || {};
+    const how = payload.howToTest || {};
+    const structure = payload.structure || {};
+    const langs = payload.languages || [];
+    const scores = payload.scores || {};
+    const analyzedLabel = formatAnalyzedAt(payload.analyzedAt || payload.fetchedAt);
+    const tip = pokemon.personality
+      ? `${pokemon.name}: ${pokemon.personality}`
+      : `${pokemon.name}: ${pokemon.signal || pokemon.blurb || ""}`;
+
+    const goods = [];
+    for (const n of structure.notes || []) {
+      if (n.ok) goods.push(n.text);
+    }
+    for (const [label, key] of SCORE_ROWS) {
+      if ((scores[key] || 0) >= 7.5) {
+        goods.push(`${label} reads strong (${Number(scores[key]).toFixed(1)}/10)`);
+      }
+    }
+    if (how.hasTests) goods.push("Automated tests are visible in the public tree");
+    if (how.hasCi) goods.push("CI / Actions config is present");
+    if (repo.license) goods.push(`License is clear (${repo.license})`);
+    const uniqueGoods = [...new Set(goods)].slice(0, 5);
+
+    const watch = (structure.notes || [])
+      .filter((n) => !n.ok)
+      .map((n) => n.text)
+      .slice(0, 3);
+
+    const commands = (how.commands || [])
+      .map(
+        (c) => `
+        <li>
+          <code class="pg-cmd">${escapeHtml(c.cmd)}</code>
+          <span class="pg-cmd-via">${escapeHtml(c.via)}</span>
+        </li>`
+      )
+      .join("");
+
+    const langLine = langs
+      .slice(0, 4)
+      .map((l) => `${l.name} ${l.percent}%`)
+      .join(" · ");
+
+    const snaps = [
+      {
+        label: "Structure",
+        value: `${structure.score ?? "-"}/10`,
+        tone: scoreTone(structure.score),
+      },
+      {
+        label: "Tests",
+        value: how.hasTests ? "visible" : "not clear",
+        tone: how.hasTests ? "good" : "thin",
+      },
+      {
+        label: "CI",
+        value: how.hasCi ? "configured" : "not clear",
+        tone: how.hasCi ? "good" : "thin",
+      },
+      {
+        label: "AI signal",
+        value: payload.aiAssistance?.label || payload.aiAssistance?.level || "none",
+        tone: "muted",
+      },
+    ];
+
+    return `
+      <div class="pg-repo-page pg-anim-in">
+        <header class="pg-glance pg-repo-hero-card">
+          <div class="pg-repo-page-hero">
+            <div class="pg-repo-page-mark" data-tip="${escapeAttr(tip)}">
+              <span class="pg-repo-emoji">${pokemon.emoji || "🦊"}</span>
+              <span class="pg-tip" role="tooltip">${escapeHtml(tip)}</span>
+            </div>
+            <div class="pg-repo-page-id">
+              <p class="pg-meta">
+                <a class="pg-inline-link" href="${escapeAttr(
+                  repo.owner?.login ? `https://github.com/${repo.owner.login}` : "#"
+                )}" target="_blank" rel="noopener noreferrer">@${escapeHtml(
+      repo.owner?.login || currentOwner || ""
+    )}</a>
+                ${repo.isFork ? " · fork" : ""}
+                ${repo.archived ? " · archived" : ""}
+              </p>
+              <h2 class="pg-repo-page-title">${escapeHtml(repo.name || currentRepo || "")}</h2>
+              <p class="pg-repo-page-poke">
+                <strong>${escapeHtml(pokemon.name || "Eevee")}</strong>
+                · ${escapeHtml(pokemon.personality || pokemon.blurb || "Taking shape")}
+              </p>
+            </div>
+            <button type="button" class="pg-btn pg-btn-ghost pg-refresh" data-refresh title="Refresh analysis">↻</button>
+          </div>
+          <p class="pg-takeaway">${formatRichText(
+            about.blurb || about.summary || repo.description || "Limited public description for this repository."
+          )}</p>
+          ${renderSnapChips(snaps)}
+          <div class="pg-meta-bar">
+            <span>
+              ★ ${repo.stargazers || 0}
+              · ${escapeHtml(repo.language || "Unknown")}
+              · Updated ${escapeHtml(relativeTime(repo.pushedAt))}
+              ${analyzedLabel ? ` · ${escapeHtml(analyzedLabel)}` : ""}
+              ${payload.fromCache ? " · cached" : ""}
+            </span>
+          </div>
+        </header>
+
+        ${
+          uniqueGoods.length
+            ? `<section class="pg-block pg-block-good">
+                <h3 class="pg-section-title">What looks strong</h3>
+                <ul class="pg-highlight-list pg-highlight-good">
+                  ${uniqueGoods
+                    .map((t) => `<li><span class="pg-highlight-text">${escapeHtml(t)}</span></li>`)
+                    .join("")}
+                </ul>
+              </section>`
+            : ""
+        }
+
+        ${
+          watch.length
+            ? `<section class="pg-block pg-block-watch">
+                <h3 class="pg-section-title">Gaps from public signals</h3>
+                <ul class="pg-highlight-list pg-highlight-watch">
+                  ${watch
+                    .map((t) => `<li><span class="pg-highlight-text">${escapeHtml(t)}</span></li>`)
+                    .join("")}
+                </ul>
+              </section>`
+            : ""
+        }
+
+        <section class="pg-block">
+          <div class="pg-repo-section-head">
+            <h3 class="pg-section-title">About this repo</h3>
+            ${about.fromReadme ? kindBadge("observed") : kindBadge("inferred")}
+          </div>
+          <p class="pg-prose">${formatRichText(
+            about.summary || "Not enough README or description text to summarize."
+          )}</p>
+          ${
+            (about.bullets || []).length
+              ? `<ul class="pg-fact-list">${(about.bullets || [])
+                  .slice(0, 6)
+                  .map((b) => `<li>${formatRichText(b)}</li>`)
+                  .join("")}</ul>`
+              : ""
+          }
+          ${langLine ? `<p class="pg-meta" style="margin-top:10px">${escapeHtml(langLine)}</p>` : ""}
+        </section>
+
+        <section class="pg-block pg-block-action">
+          <div class="pg-repo-section-head">
+            <h3 class="pg-section-title">How to test it</h3>
+            ${kindBadge(how.kind || "uncertain")}
+          </div>
+          <p class="pg-prose">${escapeHtml(how.verdict || "")}</p>
+          ${
+            commands
+              ? `<ul class="pg-cmd-list">${commands}</ul>`
+              : `<p class="pg-section-lede">No single public test command stood out. Check the README and Actions tab.</p>`
+          }
+          ${
+            (how.workflows || []).length
+              ? `<p class="pg-meta" style="margin-top:10px">Workflows: ${escapeHtml(
+                  (how.workflows || []).slice(0, 4).join(", ")
+                )}</p>`
+              : ""
+          }
+        </section>
+
+        <section class="pg-block">
+          <div class="pg-repo-section-head">
+            <h3 class="pg-section-title">Structure</h3>
+            <span class="pg-structure-score">${escapeHtml(String(structure.score ?? "-"))}/10</span>
+          </div>
+          <p class="pg-prose">
+            Reads as <strong>${escapeHtml(structure.label || "mixed")}</strong> from the public root layout
+            ${
+              structure.architectureScore != null
+                ? `(architecture signal ${escapeHtml(String(structure.architectureScore))}/10)`
+                : ""
+            }.
+          </p>
+          ${renderScorePills(scores, 6)}
+          ${
+            (structure.rootFiles || []).length
+              ? `<details class="pg-mini-details">
+                  <summary>Root files seen</summary>
+                  <div class="pg-langs">${(structure.rootFiles || [])
+                    .slice(0, 20)
+                    .map((f) => `<span class="pg-lang-chip">${escapeHtml(f)}</span>`)
+                    .join("")}</div>
+                </details>`
+              : ""
+          }
+          <p class="pg-disclaimer">${escapeHtml(DISCLAIMER)}</p>
+        </section>
+
+        ${renderAiCard(payload.aiAssistance)}
+
+        ${
+          pokemon.why
+            ? `<section class="pg-block">
+                <h3 class="pg-section-title">Why ${escapeHtml(pokemon.name)}?</h3>
+                <p class="pg-prose">${linkPokemonTerms(pokemon.why)}</p>
+              </section>`
+            : ""
+        }
+
+        <a class="pg-repo-link" href="${escapeAttr(
+          repo.htmlUrl || `https://github.com/${currentOwner}/${currentRepo}`
+        )}" target="_blank" rel="noopener noreferrer">Open on GitHub →</a>
       </div>`;
   }
 
   function renderInsightBlocks(summary) {
+    const strengths = renderLabeledList("Good characteristics", summary?.strengths, "pg-flag-green", "+");
+    const concerns = renderLabeledList("Watch outs", summary?.concerns, "pg-flag-red", "!");
+    const interesting = renderLabeledList("Also interesting", summary?.interesting, "pg-flag-interesting", "·");
     const style = summary?.style
-      ? `<p class="pg-style">${linkPokemonTerms(summary.style)}</p>`
+      ? `<p class="pg-prose pg-style-lead">${linkPokemonTerms(summary.style)}</p>`
       : "";
     return `
       ${style}
       ${summary?.unavailable ? `<p class="pg-ai-fallback">AI insights unavailable. Showing structured GitHub signals instead.</p>` : ""}
       <div class="pg-flags">
-        ${renderLabeledList("Green flags", summary?.strengths, "pg-flag-green", "+")}
-        ${renderLabeledList("Red flags", summary?.concerns, "pg-flag-red", "!")}
-        ${renderLabeledList("Interesting", summary?.interesting, "pg-flag-interesting", "·")}
+        ${strengths || `<p class="pg-section-lede">No clear green flags from this public sample yet.</p>`}
+        ${concerns}
+        ${interesting}
       </div>
       ${renderAiCard(summary?.aiAssistance)}`;
   }
@@ -796,7 +1288,7 @@
       <div class="pg-card pg-anim-in">
         <p class="pg-handle">@${escapeHtml(payload.user.login)}</p>
         <h3 class="pg-card-title">Not enough public information</h3>
-        <p class="pg-style">${escapeHtml(
+        <p class="pg-prose">${escapeHtml(
       payload.insufficientReason || "Not enough public information to generate a meaningful profile."
     )}</p>
       </div>`;
@@ -815,61 +1307,84 @@
         ? ` · refreshed (earlier: ${formatAnalyzedAt(payload.previousAnalyzedAt)})`
         : "";
 
+    const topObs = [...(surprises || []), ...(observations || [])]
+      .filter((o, i, arr) => arr.findIndex((x) => x.id === o.id || x.title === o.title) === i)
+      .slice(0, 4);
+
     return `
       ${renderGlance(payload)}
       <div class="pg-meta-bar">
         <span>Analyzed ${escapeHtml(when || "just now")}${escapeHtml(cacheNote)}</span>
         <button type="button" class="pg-link-btn" data-refresh>Refresh</button>
       </div>
-      ${renderSurprises(surprises)}
-      ${renderObservations(observations)}
-      ${renderEvidenceBlock(evidence)}
-      <div class="pg-card pg-anim-fade" style="--pg-i:1">
-        <h3 class="pg-card-title">Engineering scores</h3>
-        <p class="pg-section-lede">Experimental readings of public repo signals. Not an ability grade.</p>
-        <div class="pg-bars">${renderScoreBars(profileScores)}</div>
+
+      <section class="pg-block pg-block-good pg-anim-fade" style="--pg-i:0">
+        <h3 class="pg-section-title">Good characteristics</h3>
+        <p class="pg-section-lede">Strengths visible from public repos. Not a seniority grade.</p>
+        ${renderHighlightItems(summary?.strengths, "Nothing clear enough to call a strength yet.")}
+      </section>
+
+      ${renderObservations(topObs, {
+        title: "What stands out",
+        lede: "Highest-signal patterns with evidence you can check.",
+        limit: 4,
+      })}
+
+      ${
+        insightItems(summary?.concerns).length
+          ? `<section class="pg-block pg-block-watch pg-anim-fade" style="--pg-i:1">
+              <h3 class="pg-section-title">Watch outs</h3>
+              <p class="pg-section-lede">Gaps in the public sample. Often fixable, not a verdict.</p>
+              ${renderHighlightItems(summary?.concerns)}
+            </section>`
+          : ""
+      }
+
+      <section class="pg-block pg-anim-fade" style="--pg-i:2">
+        <h3 class="pg-section-title">Score snapshot</h3>
+        <p class="pg-section-lede">Experimental readings of public signals across ${repos.length} repos.</p>
+        ${renderScorePills(profileScores, 6)}
         <div class="pg-activity pg-activity-compact">
           <div class="pg-activity-row"><span>Repos with tests</span><strong>${withTests}/${repos.length}</strong></div>
           <div class="pg-activity-row"><span>Repos with CI</span><strong>${withCi}/${repos.length}</strong></div>
         </div>
-        <p class="pg-disclaimer">${escapeHtml(DISCLAIMER)}</p>
-      </div>
-      <div class="pg-stands pg-anim-fade" style="--pg-i:2">
-        <h3>AI reading</h3>
-        ${renderKindLegend()}
-        ${renderInsightBlocks(summary)}
-      </div>`;
+        <details class="pg-mini-details">
+          <summary>Full score bars</summary>
+          <div class="pg-bars">${renderScoreBars(profileScores, false)}</div>
+          <p class="pg-disclaimer">${escapeHtml(DISCLAIMER)}</p>
+        </details>
+      </section>
+
+      ${renderAiCard(summary?.aiAssistance)}
+
+      ${
+        insightItems(summary?.interesting).length
+          ? `<section class="pg-block pg-anim-fade" style="--pg-i:3">
+              <h3 class="pg-section-title">Also interesting</h3>
+              ${renderHighlightItems(summary?.interesting)}
+            </section>`
+          : ""
+      }
+
+      ${
+        summary?.style
+          ? `<section class="pg-block">
+              <h3 class="pg-section-title">AI reading</h3>
+              ${renderKindLegend()}
+              <p class="pg-prose">${linkPokemonTerms(summary.style)}</p>
+            </section>`
+          : ""
+      }
+
+      ${renderEvidenceBlock(evidence)}`;
   }
 
   function renderSurprises(surprises = []) {
-    if (!surprises?.length) return "";
-    const cards = surprises
-      .map(
-        (o, i) => `
-        <article class="pg-obs pg-surprise pg-anim-fade" style="--pg-i:${i}">
-          <div class="pg-obs-head">
-            <span class="pg-obs-icon" aria-hidden="true">${o.icon || "✨"}</span>
-            <div class="pg-obs-titles">
-              <h4>${escapeHtml(o.title)}</h4>
-              ${kindBadge(o.kind)}
-            </div>
-          </div>
-          <p>${linkPokemonTerms(o.body)}</p>
-          ${o.evidence?.length
-            ? `<ul class="pg-evidence">${o.evidence
-              .map((e) => `<li><span class="pg-check">✓</span>${escapeHtml(e)}</li>`)
-              .join("")}</ul>`
-            : ""
-          }
-        </article>`
-      )
-      .join("");
-    return `
-      <section class="pg-obs-section">
-        <h3 class="pg-section-title">Why this is interesting</h3>
-        <p class="pg-section-lede">Only shown when cross-repo patterns have real evidence.</p>
-        ${cards}
-      </section>`;
+    return renderObservations(surprises, {
+      title: "Why this is interesting",
+      lede: "Only shown when cross-repo patterns have real evidence.",
+      limit: 3,
+    });
   }
 
   function renderRepoDrilldown(item) {
@@ -1301,11 +1816,16 @@
 
   function renderAboutTab(payload) {
     const rem = payload?.rateLimitRemaining;
+    const isRepo = pageMode === "repo" || payload?.mode === "repo";
     return `
       <div class="pg-about pg-anim-in">
         <h3 class="pg-card-title">What PokéGit is</h3>
         <p class="pg-style">
-          a chrome extension that analyzes public github profiles.
+          ${
+            isRepo
+              ? "a chrome extension that analyzes public github repositories (and profiles)."
+              : "a chrome extension that analyzes public github profiles."
+          }
         </p>
         ${renderPokeLegend()}
         <div class="pg-card" style="margin-top:16px">
@@ -1315,6 +1835,11 @@
             <li><strong>Observed</strong>: visible in public data (tests, CI, languages, push dates).</li>
             <li><strong>Inferred</strong>: a reasonable interpretation of those patterns.</li>
             <li><strong>Uncertain</strong>: public GitHub alone can’t settle it.</li>
+            ${
+              isRepo
+                ? `<li><strong>Repo mode</strong>: blends README text with root layout, manifests, languages, and workflow files. Never a private-code audit.</li>`
+                : ""
+            }
           </ul>
           <p class="pg-disclaimer">${escapeHtml(DISCLAIMER)}</p>
           ${rem != null ? `<p class="pg-meta">GitHub API remaining (approx): ${escapeHtml(String(rem))}</p>` : ""}
@@ -1323,12 +1848,23 @@
   }
 
   function syncToLocation() {
-    const username = parseProfileUsername();
-    if (username !== currentUsername) {
-      currentUsername = username;
+    if (contextDead || !extensionAlive()) {
+      markContextDead();
+      return;
+    }
+    const ctx = parsePageContext();
+    const nextKey = contextKey(ctx);
+    const prevKey = contextKey();
+    const changed = nextKey !== prevKey;
+
+    if (changed) {
+      pageMode = ctx.mode;
+      currentUsername = ctx.username;
+      currentOwner = ctx.owner;
+      currentRepo = ctx.repo;
       lastPayload = null;
       lastError = null;
-      activeTab = "profile";
+      activeTab = defaultTabForMode();
       showSettings = false;
       expandedRepos = new Set();
       compareResult = null;
@@ -1337,13 +1873,21 @@
       repoSort = "interesting";
       repoLangFilter = "all";
       repoPokeFilter = "all";
-      // Leaving a profile page should never leave the overlay up
-      if (!username) closePanel();
+
+      if (!ctx.mode) {
+        closePanel();
+      } else if (panelOpen) {
+        // Stay open across profile ↔ repo SPA navigation and re-analyze
+        ensurePanel();
+        updateTabsVisibility();
+        analyze(false);
+      }
     }
-    // Only the pokéball on profile pages — nothing else until clicked
-    if (username) {
+
+    if (ctx.mode) {
       ensureFab();
-      state.fab.hidden = false;
+      if (state.fab) state.fab.hidden = false;
+      if (state.shadow) updateTabsVisibility();
     } else if (state.fab) {
       state.fab.hidden = true;
     }
