@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "PokéGit",
-  "version": "0.5.0",
-  "description": "PokéGit — playful, evidence-backed reads of public GitHub profiles. Shareable insights, not ability grades.",
+  "version": "0.6.0",
+  "description": "a chrome extension that analyzes public github profiles.",
   "permissions": ["storage"],
   "host_permissions": [
     "https://api.github.com/*",

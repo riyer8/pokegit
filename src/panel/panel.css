@@ -255,18 +255,6 @@
   font-family: inherit;
 }
 
-.pokegit-icon-btn[data-share] {
-  width: auto;
-  padding: 0 12px;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-
-.pokegit-icon-btn[hidden] {
-  display: none !important;
-}
-
 .pokegit-icon-btn:hover,
 .pokegit-icon-btn.is-active {
   background: rgba(21, 32, 51, 0.12);
@@ -486,6 +474,29 @@
 .pg-flag-green .pg-flag-mark {
   background: rgba(15, 122, 79, 0.12);
   color: #0f7a4f;
+}
+
+.pg-flag-red h4 {
+  color: #cf222e;
+}
+
+.pg-flag-red .pg-flag-mark {
+  background: rgba(207, 34, 46, 0.12);
+  color: #cf222e;
+}
+
+.pokegit-panel[data-theme="dark"] .pg-flag-red h4 {
+  color: #ff7b72;
+}
+
+.pokegit-panel[data-theme="dark"] .pg-flag-red .pg-flag-mark {
+  background: rgba(255, 123, 114, 0.15);
+  color: #ff7b72;
+}
+
+.pg-flag-empty {
+  font-size: 13px;
+  color: var(--pg-muted);
 }
 
 .pg-flag-interesting h4 {
@@ -1507,54 +1518,7 @@
   }
 }
 
-/* —— Day 3: share + polish —— */
-.pokegit-toast {
-  position: absolute;
-  left: 50%;
-  top: 72px;
-  transform: translateX(-50%) translateY(-6px);
-  z-index: 5;
-  padding: 8px 14px;
-  border-radius: 999px;
-  background: var(--pg-ink);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.2s ease, transform 0.2s ease;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.25);
-}
-
-.pokegit-toast.is-visible {
-  opacity: 1;
-  transform: translateX(-50%) translateY(0);
-}
-
-.pokegit-panel[data-theme="dark"] .pokegit-toast {
-  background: #e6edf3;
-  color: #0d1117;
-}
-
-.pg-share-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 14px;
-  margin: -6px 0 18px;
-}
-
-.pg-btn-share {
-  padding: 9px 14px;
-  font-size: 13px;
-}
-
-.pg-share-hint {
-  font-size: 11px;
-  color: var(--pg-muted);
-}
-
+/* —— Day 3 polish —— */
 .pg-activity-compact {
   margin-top: 14px;
   padding-top: 12px;
@@ -1579,4 +1543,135 @@
 
 .pokegit-body {
   scroll-behavior: smooth;
+}
+
+.pg-meta-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: -4px 0 12px;
+  font-size: 11px;
+  color: var(--pg-muted);
+}
+
+.pg-link-btn {
+  border: none;
+  background: transparent;
+  color: var(--pg-accent);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+}
+
+.pg-link-btn:hover {
+  text-decoration: underline;
+}
+
+.pg-surprise {
+  border-color: rgba(227, 53, 13, 0.22);
+  background:
+    linear-gradient(135deg, rgba(227, 53, 13, 0.05), transparent 60%),
+    var(--pg-card);
+}
+
+.pg-repo-filters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.pg-repo-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--pg-muted);
+}
+
+.pg-repo-filters select,
+.pg-input {
+  width: 100%;
+  border: 1px solid var(--pg-line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: var(--pg-card);
+  color: var(--pg-ink);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.pg-compare-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.pg-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.pg-chip {
+  border: 1px solid var(--pg-line);
+  background: var(--pg-card);
+  color: var(--pg-ink-soft);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.pg-chip:hover {
+  border-color: rgba(227, 53, 13, 0.35);
+  color: var(--pg-ink);
+}
+
+.pg-compare-heads {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 10px;
+  align-items: start;
+  margin: 16px 0 10px;
+}
+
+.pg-compare-vs {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--pg-muted);
+  padding-top: 6px;
+}
+
+.pg-obs-sim {
+  opacity: 0.95;
+}
+
+.pg-compare-result .pg-obs {
+  margin-bottom: 10px;
+}
+
+@media (max-width: 420px) {
+  .pg-repo-filters {
+    grid-template-columns: 1fr;
+  }
+  .pg-compare-heads {
+    grid-template-columns: 1fr;
+  }
+  .pg-compare-vs {
+    display: none;
+  }
 }

@@ -42,11 +42,11 @@ export function buildEvidence(analyzedRepos, profileScores) {
     { ok: mature > 0, text: `${mature} project(s) are 2+ years old` },
     {
       ok: (profileScores.testing || 0) >= 7,
-      text: `Testing score ${profileScores.testing ?? "—"}/10`,
+      text: `Testing score ${profileScores.testing ?? "-"}/10`,
     },
     {
       ok: (profileScores.maintenance || 0) >= 7,
-      text: `Maintenance score ${profileScores.maintenance ?? "—"}/10`,
+      text: `Maintenance score ${profileScores.maintenance ?? "-"}/10`,
     },
   ];
 
@@ -202,6 +202,154 @@ export function buildObservations(analyzedRepos, profileScores, languageSummary 
   }
 
   return observations.slice(0, 5);
+}
+
+/**
+ * 1–3 surprising cross-repo patterns. Empty array if nothing credible.
+ * Never invent filler.
+ */
+export function buildSurprises(analyzedRepos, profileScores, languageSummary = []) {
+  const n = analyzedRepos.length;
+  if (n < 2) return [];
+
+  const surprises = [];
+  const withTests = analyzedRepos.filter((a) => a.signals?.hasTests);
+  const withCi = analyzedRepos.filter((a) => a.signals?.hasCi);
+  const oldAlive = analyzedRepos.filter(
+    (a) => ageYears(a.repo.createdAt) >= 3 && daysSince(a.repo.pushedAt) < 120
+  );
+  const bigQuiet = analyzedRepos.filter(
+    (a) => (a.repo.stargazers || 0) >= 80 && daysSince(a.repo.pushedAt) > 400
+  );
+  const ciNoTests = analyzedRepos.filter((a) => a.signals?.hasCi && !a.signals?.hasTests);
+  const testsNoCi = analyzedRepos.filter((a) => a.signals?.hasTests && !a.signals?.hasCi);
+
+  // Sorted by age of last push — newest vs oldest language
+  const byPush = [...analyzedRepos].sort(
+    (a, b) => new Date(b.repo.pushedAt) - new Date(a.repo.pushedAt)
+  );
+  const recentLangs = new Set(byPush.slice(0, Math.min(3, n)).map((a) => a.repo.language).filter(Boolean));
+  const olderLangs = new Set(byPush.slice(-Math.min(3, n)).map((a) => a.repo.language).filter(Boolean));
+  const recentOnly = [...recentLangs].filter((l) => !olderLangs.has(l));
+  const olderOnly = [...olderLangs].filter((l) => !recentLangs.has(l));
+
+  if (oldAlive.length >= 2) {
+    surprises.push({
+      id: "long-care",
+      icon: "⏳",
+      title: "They keep old projects alive",
+      kind: "observed",
+      body: `${oldAlive.length} repositories are 3+ years old and still saw pushes in the last ~4 months. Longevity with care, not just archive dust.`,
+      evidence: oldAlive.slice(0, 3).map((a) => `${a.repo.name} (~${ageYears(a.repo.createdAt).toFixed(1)}y)`),
+    });
+  }
+
+  if (withTests.length >= 3 && withTests.length / n >= 0.75 && (profileScores.testing || 0) >= 8) {
+    const names = withTests.slice(0, 3).map((a) => a.repo.name);
+    surprises.push({
+      id: "test-habit",
+      icon: "🧪",
+      title: "Testing shows up as a habit, not a one-off",
+      kind: "inferred",
+      body: `Automated tests appear across ${withTests.length}/${n} analyzed repos (${names.join(", ")}${
+        withTests.length > 3 ? "…" : ""
+      }). That consistency is rarer than a single well-tested showcase.`,
+      evidence: [`Tests in ${withTests.length}/${n}`, withCi.length ? `CI in ${withCi.length}/${n}` : null].filter(
+        Boolean
+      ),
+    });
+  }
+
+  const langs = (languageSummary || []).map((l) => l.name);
+  if (langs.length >= 2 && (languageSummary[0]?.percent || 0) >= 55) {
+    surprises.push({
+      id: "home-base",
+      icon: "🏠",
+      title: `${langs[0]} is a real home base`,
+      kind: "observed",
+      body: `About ${languageSummary[0].percent}% of analyzed weight sits in ${langs[0]}, with ${langs
+        .slice(1, 3)
+        .join(" / ")} around the edges. Depth over résumé padding.`,
+      evidence: languageSummary.slice(0, 3).map((l) => `${l.name} ~${l.percent}%`),
+    });
+  }
+
+  if (recentOnly.length && olderOnly.length && n >= 4) {
+    surprises.push({
+      id: "lang-shift",
+      icon: "🔀",
+      title: "Recent work may be shifting stacks",
+      kind: "inferred",
+      body: `Newer pushes surface ${recentOnly.slice(0, 2).join(" / ")}, while older work in the sample leans ${olderOnly
+        .slice(0, 2)
+        .join(" / ")}. Treat this as a hint from the sample, not a career biography.`,
+      evidence: [
+        `Recent langs: ${[...recentLangs].join(", ") || "-"}`,
+        `Older langs: ${[...olderLangs].join(", ") || "-"}`,
+      ],
+    });
+  }
+
+  if (bigQuiet.length === 1 && n >= 3) {
+    const r = bigQuiet[0].repo;
+    surprises.push({
+      id: "quiet-star",
+      icon: "⭐",
+      title: "A high-gravity repo has gone quiet",
+      kind: "observed",
+      body: `${r.name} still carries ${r.stargazers}★ but hasn't moved in a long while. It may simply be finished. It still shapes how the profile reads.`,
+      evidence: [`${r.name}: ${r.stargazers}★`, `~${Math.round(daysSince(r.pushedAt))}d since push`],
+    });
+  }
+
+  if (ciNoTests.length >= 2) {
+    surprises.push({
+      id: "ci-without-tests",
+      icon: "⚙️",
+      title: "CI without an obvious test suite",
+      kind: "observed",
+      body: `${ciNoTests.length} repos wire CI but don't show a clear test footprint at the root. Pipelines may be lint/build-only, or tests live somewhere we didn't see.`,
+      evidence: ciNoTests.slice(0, 3).map((a) => a.repo.name),
+    });
+  } else if (testsNoCi.length >= 2 && withTests.length >= 2) {
+    surprises.push({
+      id: "tests-without-ci",
+      icon: "📎",
+      title: "Tests exist without public CI",
+      kind: "observed",
+      body: `${testsNoCi.length} repos show tests but no obvious CI config. Local discipline without the public automation badge.`,
+      evidence: testsNoCi.slice(0, 3).map((a) => a.repo.name),
+    });
+  }
+
+  const pokeCounts = {};
+  for (const a of analyzedRepos) {
+    const name = a.pokemon?.name;
+    if (name) pokeCounts[name] = (pokeCounts[name] || 0) + 1;
+  }
+  const pokeKinds = Object.keys(pokeCounts);
+  if (pokeKinds.length === 1 && n >= 4) {
+    surprises.push({
+      id: "mono-poke",
+      icon: "🎯",
+      title: `Almost everything reads as ${pokeKinds[0]}`,
+      kind: "inferred",
+      body: `All ${n} analyzed repos mapped to ${pokeKinds[0]}. Unusually consistent public project shape.`,
+      evidence: [`${pokeKinds[0]} × ${n}`],
+    });
+  } else if (pokeKinds.length >= 5 && n >= 6) {
+    surprises.push({
+      id: "wide-poke",
+      icon: "🌈",
+      title: "Unusually wide repository personalities",
+      kind: "inferred",
+      body: `${pokeKinds.length} different Pokémon across ${n} repos. The public work spans quite different shapes.`,
+      evidence: pokeKinds.slice(0, 5),
+    });
+  }
+
+  // Prefer distinctive ones; drop if we only have generic home-base
+  return surprises.slice(0, 3);
 }
 
 /**

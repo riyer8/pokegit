@@ -14,3 +14,5 @@ src/lib/secrets.local.js
 *.log
 .idea/
 .vscode/
+
+.cursorignore

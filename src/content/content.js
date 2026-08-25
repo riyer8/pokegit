@@ -45,6 +45,14 @@
   let showSettings = false;
   let keyStatus = null;
   let expandedRepos = new Set();
+  let historyList = [];
+  let compareUsername = "";
+  let compareResult = null;
+  let compareLoading = false;
+  let compareError = null;
+  let repoSort = "interesting";
+  let repoLangFilter = "all";
+  let repoPokeFilter = "all";
 
   const state = { fab: null, host: null, shadow: null };
 
@@ -103,7 +111,7 @@
   }
 
   function relativeTime(iso) {
-    if (!iso) return "—";
+    if (!iso) return "-";
     const days = Math.floor((Date.now() - new Date(iso).getTime()) / (1000 * 60 * 60 * 24));
     if (days < 1) return "today";
     if (days < 30) return `${days}d ago`;
@@ -136,7 +144,7 @@
     fab.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      openPanel(true);
+      openPanel(false);
     });
     document.documentElement.appendChild(fab);
     state.fab = fab;
@@ -179,10 +187,9 @@
         <header class="pokegit-header">
           <div>
             <div class="pokegit-brand-name">Poké<span>Git</span></div>
-            <div class="pokegit-brand-sub">Public GitHub, playfully read</div>
+            <div class="pokegit-brand-sub">a chrome extension that analyzes public github profiles.</div>
           </div>
           <div class="pokegit-header-actions">
-            <button type="button" class="pokegit-icon-btn" data-share title="Copy shareable summary" aria-label="Copy shareable summary" hidden>Share</button>
             <button type="button" class="pokegit-icon-btn" data-settings title="Settings" aria-label="Settings">⚙</button>
             <button type="button" class="pokegit-close" data-close aria-label="Close">×</button>
           </div>
@@ -190,9 +197,9 @@
         <nav class="pokegit-tabs" role="tablist" data-tabs>
           <button type="button" class="pokegit-tab is-active" data-tab="profile" role="tab">Profile</button>
           <button type="button" class="pokegit-tab" data-tab="repos" role="tab">Repos</button>
+          <button type="button" class="pokegit-tab" data-tab="compare" role="tab">Compare</button>
           <button type="button" class="pokegit-tab" data-tab="about" role="tab">About</button>
         </nav>
-        <div class="pokegit-toast" data-toast hidden></div>
         <div class="pokegit-body" data-body></div>
       </aside>
     `;
@@ -204,9 +211,6 @@
       updateTabsVisibility();
       renderBody();
     });
-    wrap.querySelector("[data-share]")?.addEventListener("click", () => {
-      copyShareSummary();
-    });
     wrap.querySelectorAll("[data-tab]").forEach((el) => {
       el.addEventListener("click", () => {
         activeTab = el.getAttribute("data-tab");
@@ -217,9 +221,41 @@
       });
     });
 
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && panelOpen) closePanel();
-    });
+    document.addEventListener(
+      "keydown",
+      (e) => {
+        if (!panelOpen || !state.host) return;
+        const inPanel = e.composedPath().includes(state.host);
+        if (!inPanel) return;
+
+        // Keep Escape for closing; block everything else from GitHub shortcuts.
+        // Shadow DOM retargets focus, so GitHub thinks keys aren't in an input.
+        if (e.key === "Escape") {
+          closePanel();
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          return;
+        }
+        e.stopPropagation();
+      },
+      true
+    );
+    document.addEventListener(
+      "keyup",
+      (e) => {
+        if (!panelOpen || !state.host) return;
+        if (e.composedPath().includes(state.host)) e.stopPropagation();
+      },
+      true
+    );
+    document.addEventListener(
+      "keypress",
+      (e) => {
+        if (!panelOpen || !state.host) return;
+        if (e.composedPath().includes(state.host)) e.stopPropagation();
+      },
+      true
+    );
 
     document.documentElement.appendChild(host);
     state.host = host;
@@ -230,42 +266,6 @@
     const tabs = state.shadow?.querySelector("[data-tabs]");
     if (tabs) tabs.hidden = showSettings;
     state.shadow?.querySelector("[data-settings]")?.classList.toggle("is-active", showSettings);
-    const shareBtn = state.shadow?.querySelector("[data-share]");
-    if (shareBtn) {
-      shareBtn.hidden = showSettings || loading || !lastPayload || Boolean(lastError);
-    }
-  }
-
-  function showToast(message) {
-    const toast = state.shadow?.querySelector("[data-toast]");
-    if (!toast) return;
-    toast.textContent = message;
-    toast.hidden = false;
-    toast.classList.add("is-visible");
-    window.clearTimeout(showToast._t);
-    showToast._t = window.setTimeout(() => {
-      toast.classList.remove("is-visible");
-      toast.hidden = true;
-    }, 2200);
-  }
-
-  async function copyShareSummary() {
-    if (!lastPayload) {
-      showToast("Analyze a profile first");
-      return;
-    }
-    try {
-      const res = await chrome.runtime.sendMessage({
-        type: "POKEGIT_BUILD_SHARE",
-        payload: lastPayload,
-      });
-      const text = res?.ok ? res.text : null;
-      if (!text) throw new Error("Could not build summary");
-      await navigator.clipboard.writeText(text);
-      showToast("Profile summary copied");
-    } catch {
-      showToast("Couldn't copy — try again");
-    }
   }
 
   function openPanel(forceRefresh = false) {
@@ -288,7 +288,7 @@
       t.classList.toggle("is-active", t.getAttribute("data-tab") === "profile");
     });
     updateTabsVisibility();
-    if (forceRefresh || (!lastPayload && !loading)) analyze();
+    if (forceRefresh || (!lastPayload && !loading)) analyze(Boolean(forceRefresh));
     else renderBody();
   }
 
@@ -315,7 +315,28 @@
     }
   }
 
-  async function analyze() {
+  async function refreshHistory() {
+    try {
+      const res = await chrome.runtime.sendMessage({ type: "POKEGIT_GET_HISTORY" });
+      if (res?.ok) historyList = res.history || [];
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function formatAnalyzedAt(iso) {
+    if (!iso) return null;
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return null;
+    const mins = Math.round((Date.now() - d.getTime()) / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.round(mins / 60);
+    if (hrs < 36) return `${hrs}h ago`;
+    return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  }
+
+  async function analyze(force = true) {
     if (!currentUsername) return;
     loading = true;
     lastError = null;
@@ -328,13 +349,14 @@
       const response = await chrome.runtime.sendMessage({
         type: "POKEGIT_ANALYZE_PROFILE",
         username: currentUsername,
-        force: true,
+        force: Boolean(force),
       });
       if (!response?.ok) {
         throw Object.assign(new Error(response?.error?.message || "Analyze failed"), response?.error || {});
       }
       lastPayload = response.payload;
       await refreshKeyStatus();
+      await refreshHistory();
     } catch (err) {
       lastError = err;
       lastPayload = null;
@@ -345,6 +367,35 @@
       }
     } finally {
       loading = false;
+      renderBody();
+    }
+  }
+
+  async function runCompare(force = false) {
+    const right = (compareUsername || "").trim().replace(/^@/, "");
+    if (!currentUsername || !right) {
+      compareError = "Enter a second GitHub username.";
+      renderBody();
+      return;
+    }
+    compareLoading = true;
+    compareError = null;
+    renderBody();
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: "POKEGIT_COMPARE_PROFILES",
+        leftUsername: currentUsername,
+        rightUsername: right,
+        force: Boolean(force),
+      });
+      if (!res?.ok) throw new Error(res?.error?.message || "Compare failed");
+      compareResult = res.comparison;
+      await refreshHistory();
+    } catch (err) {
+      compareResult = null;
+      compareError = err.message || "Compare failed";
+    } finally {
+      compareLoading = false;
       renderBody();
     }
   }
@@ -384,10 +435,10 @@
           <div class="pg-error-mark" aria-hidden="true">!</div>
           <h3>Couldn't analyze this profile</h3>
           <p>${escapeHtml(
-            notFound
-              ? "Invalid or missing GitHub profile."
-              : lastError.message || "Try again."
-          )}</p>
+        notFound
+          ? "Invalid or missing GitHub profile."
+          : lastError.message || "Try again."
+      )}</p>
           ${rateLimited ? `<p>GitHub rate limit hit. Add a token in Settings.</p>` : ""}
           <div class="pg-error-actions">
             <button type="button" class="pg-btn pg-btn-primary" data-retry>Try again</button>
@@ -414,10 +465,14 @@
 
     if (activeTab === "profile") {
       body.innerHTML = renderProfileTab(lastPayload);
-      body.querySelector("[data-share-cta]")?.addEventListener("click", copyShareSummary);
+      body.querySelector("[data-refresh]")?.addEventListener("click", () => analyze(true));
     } else if (activeTab === "repos") {
       body.innerHTML = renderReposTab(lastPayload);
       wireRepoExpands(body);
+      wireRepoFilters(body);
+    } else if (activeTab === "compare") {
+      body.innerHTML = renderCompareTab(lastPayload);
+      wireCompare(body);
     } else {
       body.innerHTML = renderAboutTab(lastPayload);
     }
@@ -441,24 +496,21 @@
         ${localNote}
         <div class="pg-field">
           <label for="pg-github">GitHub token</label>
-          <input id="pg-github" type="password" autocomplete="off" placeholder="${
-            ghLocked ? "Loaded from .env" : gh?.hint || "ghp_… or github_pat_…"
-          }" ${ghLocked ? "disabled" : ""} />
+          <input id="pg-github" type="password" autocomplete="off" placeholder="${ghLocked ? "Loaded from .env" : gh?.hint || "ghp_… or github_pat_…"
+      }" ${ghLocked ? "disabled" : ""} />
         </div>
         <div class="pg-field">
           <label for="pg-openai">OpenAI API key</label>
-          <input id="pg-openai" type="password" autocomplete="off" placeholder="${
-            oaLocked ? "Loaded from .env" : oa?.hint || "sk-…"
-          }" ${oaLocked ? "disabled" : ""} />
+          <input id="pg-openai" type="password" autocomplete="off" placeholder="${oaLocked ? "Loaded from .env" : oa?.hint || "sk-…"
+      }" ${oaLocked ? "disabled" : ""} />
         </div>
         <div class="pg-keys-actions">
-          ${
-            ghLocked && oaLocked
-              ? `<button type="button" class="pg-btn pg-btn-primary" data-back>Back</button>`
-              : `<button type="button" class="pg-btn pg-btn-primary" data-save>Save keys</button>
+          ${ghLocked && oaLocked
+        ? `<button type="button" class="pg-btn pg-btn-primary" data-back>Back</button>`
+        : `<button type="button" class="pg-btn pg-btn-primary" data-save>Save keys</button>
                  <button type="button" class="pg-btn pg-btn-ghost" data-clear>Clear saved</button>
                  <button type="button" class="pg-btn pg-btn-ghost" data-back>Back</button>`
-          }
+      }
         </div>
         <p class="pg-keys-msg" data-msg></p>
         ${renderPokeLegend()}
@@ -499,7 +551,7 @@
     return SCORE_ROWS.map(([label, key, icon], i) => {
       const score = scores?.[key];
       const v = score == null ? 0 : Math.max(0, Math.min(10, score));
-      const display = score == null ? "—" : v.toFixed(1);
+      const display = score == null ? "-" : v.toFixed(1);
       const delay = animate ? `style="--pg-i:${i}"` : "";
       return `
         <div class="pg-bar-row ${animate ? "pg-anim-bar" : ""}" ${delay}>
@@ -539,11 +591,6 @@
     const user = payload.user;
     const glance = payload.glance || {};
     const summary = payload.summary || {};
-    const headline =
-      glance.headline ||
-      summary.glanceHeadline ||
-      user.bio?.split(/[.\n]/)[0]?.trim() ||
-      "Public GitHub engineer";
     const oneLiner = glance.oneLiner || summary.oneLiner || summary.style || "";
     const strongest = glance.strongest?.length
       ? glance.strongest
@@ -574,7 +621,6 @@
           <img class="pg-avatar pg-avatar-sm" src="${escapeAttr(user.avatarUrl)}" alt="" width="48" height="48" />
           <div>
             <p class="pg-handle">@${escapeHtml(user.login)}</p>
-            <p class="pg-glance-archetype">🧑‍💻 ${escapeHtml(headline)}</p>
           </div>
         </div>
         <p class="pg-glance-label">Strongest signals</p>
@@ -601,12 +647,11 @@
             </div>
           </div>
           <p>${linkPokemonTerms(o.body)}</p>
-          ${
-            o.evidence?.length
-              ? `<ul class="pg-evidence">${o.evidence
-                  .map((e) => `<li><span class="pg-check">✓</span>${escapeHtml(e)}</li>`)
-                  .join("")}</ul>`
-              : ""
+          ${o.evidence?.length
+            ? `<ul class="pg-evidence">${o.evidence
+              .map((e) => `<li><span class="pg-check">✓</span>${escapeHtml(e)}</li>`)
+              .join("")}</ul>`
+            : ""
           }
         </article>`
       )
@@ -638,19 +683,24 @@
       </section>`;
   }
 
-  function renderLabeledList(title, items, cls) {
+  function renderLabeledList(title, items, cls, mark) {
     const list = insightItems(items);
-    if (!list.length) return "";
+    const empty = !list.length
+      ? `<li><div class="pg-flag-item"><span class="pg-flag-empty">Nothing clear enough to flag from public signals.</span></div></li>`
+      : "";
     return `
       <div class="pg-flag-col ${cls}">
         <h4>${title}</h4>
         <ul>
-          ${list
-            .map(
-              (i) => `
+          ${
+            list.length
+              ? list
+                  .map(
+                    (i) => `
             <li>
               <div class="pg-flag-item">
                 <div class="pg-flag-item-top">
+                  <span class="pg-flag-mark" aria-hidden="true">${mark}</span>
                   ${kindBadge(i.kind)}
                   <span>${linkPokemonTerms(i.text)}</span>
                 </div>
@@ -663,8 +713,10 @@
                 }
               </div>
             </li>`
-            )
-            .join("")}
+                  )
+                  .join("")
+              : empty
+          }
         </ul>
       </div>`;
   }
@@ -697,9 +749,9 @@
       ${style}
       ${summary?.unavailable ? `<p class="pg-ai-fallback">AI insights unavailable. Showing structured GitHub signals instead.</p>` : ""}
       <div class="pg-flags">
-        ${renderLabeledList("Strengths", summary?.strengths, "pg-flag-green")}
-        ${renderLabeledList("Interesting", summary?.interesting, "pg-flag-interesting")}
-        ${renderLabeledList("Potential concerns", summary?.concerns, "pg-flag-red")}
+        ${renderLabeledList("Green flags", summary?.strengths, "pg-flag-green", "+")}
+        ${renderLabeledList("Red flags", summary?.concerns, "pg-flag-red", "!")}
+        ${renderLabeledList("Interesting", summary?.interesting, "pg-flag-interesting", "·")}
       </div>
       ${renderAiCard(summary?.aiAssistance)}`;
   }
@@ -710,29 +762,36 @@
         <p class="pg-handle">@${escapeHtml(payload.user.login)}</p>
         <h3 class="pg-card-title">Not enough public information</h3>
         <p class="pg-style">${escapeHtml(
-          payload.insufficientReason || "Not enough public information to generate a meaningful profile."
-        )}</p>
+      payload.insufficientReason || "Not enough public information to generate a meaningful profile."
+    )}</p>
       </div>`;
   }
 
   function renderProfileTab(payload) {
     if (payload.insufficient) return renderInsufficient(payload);
-    const { profileScores, summary, observations, evidence } = payload;
+    const { profileScores, summary, observations, evidence, surprises } = payload;
     const repos = payload.analyzedRepos || [];
     const withTests = repos.filter((r) => r.signals?.hasTests).length;
     const withCi = repos.filter((r) => r.signals?.hasCi).length;
+    const when = formatAnalyzedAt(payload.analyzedAt || payload.fetchedAt);
+    const cacheNote = payload.fromCache
+      ? ` · from local cache`
+      : payload.previousAnalyzedAt
+        ? ` · refreshed (earlier: ${formatAnalyzedAt(payload.previousAnalyzedAt)})`
+        : "";
 
     return `
       ${renderGlance(payload)}
-      <div class="pg-share-bar">
-        <button type="button" class="pg-btn pg-btn-primary pg-btn-share" data-share-cta>Copy profile summary</button>
-        <span class="pg-share-hint">Shareable text · public data only</span>
+      <div class="pg-meta-bar">
+        <span>Analyzed ${escapeHtml(when || "just now")}${escapeHtml(cacheNote)}</span>
+        <button type="button" class="pg-link-btn" data-refresh>Refresh</button>
       </div>
+      ${renderSurprises(surprises)}
       ${renderObservations(observations)}
       ${renderEvidenceBlock(evidence)}
       <div class="pg-card pg-anim-fade" style="--pg-i:1">
         <h3 class="pg-card-title">Engineering scores</h3>
-        <p class="pg-section-lede">Experimental readings of public repo signals — not an ability grade.</p>
+        <p class="pg-section-lede">Experimental readings of public repo signals. Not an ability grade.</p>
         <div class="pg-bars">${renderScoreBars(profileScores)}</div>
         <div class="pg-activity pg-activity-compact">
           <div class="pg-activity-row"><span>Repos with tests</span><strong>${withTests}/${repos.length}</strong></div>
@@ -745,6 +804,37 @@
         ${renderKindLegend()}
         ${renderInsightBlocks(summary)}
       </div>`;
+  }
+
+  function renderSurprises(surprises = []) {
+    if (!surprises?.length) return "";
+    const cards = surprises
+      .map(
+        (o, i) => `
+        <article class="pg-obs pg-surprise pg-anim-fade" style="--pg-i:${i}">
+          <div class="pg-obs-head">
+            <span class="pg-obs-icon" aria-hidden="true">${o.icon || "✨"}</span>
+            <div class="pg-obs-titles">
+              <h4>${escapeHtml(o.title)}</h4>
+              ${kindBadge(o.kind)}
+            </div>
+          </div>
+          <p>${linkPokemonTerms(o.body)}</p>
+          ${o.evidence?.length
+            ? `<ul class="pg-evidence">${o.evidence
+              .map((e) => `<li><span class="pg-check">✓</span>${escapeHtml(e)}</li>`)
+              .join("")}</ul>`
+            : ""
+          }
+        </article>`
+      )
+      .join("");
+    return `
+      <section class="pg-obs-section">
+        <h3 class="pg-section-title">Why this is interesting</h3>
+        <p class="pg-section-lede">Only shown when cross-repo patterns have real evidence.</p>
+        ${cards}
+      </section>`;
   }
 
   function renderRepoDrilldown(item) {
@@ -762,7 +852,7 @@
         ([label, v]) => `
         <div class="pg-mini-score">
           <span>${escapeHtml(label)}</span>
-          <strong>${v == null ? "—" : Number(v).toFixed(1)}</strong>
+          <strong>${v == null ? "-" : Number(v).toFixed(1)}</strong>
         </div>`
       )
       .join("");
@@ -791,19 +881,17 @@
           <h4>${escapeHtml(dd.whyTitle || `Why ${pokemon.name}?`)}</h4>
           <p>${linkPokemonTerms(dd.whyBody || pokemon.why || pokemon.signal)}</p>
         </div>
-        ${
-          checks
-            ? `<div class="pg-drill-block"><h4>Signals</h4><ul class="pg-evidence">${checks}</ul></div>`
-            : ""
-        }
-        ${
-          interesting
-            ? `<div class="pg-drill-block"><h4>Interesting</h4><ul class="pg-interesting-list">${interesting}</ul></div>`
-            : ""
-        }
+        ${checks
+        ? `<div class="pg-drill-block"><h4>Signals</h4><ul class="pg-evidence">${checks}</ul></div>`
+        : ""
+      }
+        ${interesting
+        ? `<div class="pg-drill-block"><h4>Interesting</h4><ul class="pg-interesting-list">${interesting}</ul></div>`
+        : ""
+      }
         <div class="pg-repo-foot">
           <span>★ ${repo.stargazers || 0}</span>
-          <span>${escapeHtml(repo.language || "—")}</span>
+          <span>${escapeHtml(repo.language || "-")}</span>
           <span>Updated ${escapeHtml(relativeTime(repo.pushedAt))}</span>
           <span>Tests ${signals.hasTests ? "yes" : "no"}</span>
           <span>CI ${signals.hasCi ? "yes" : "no"}</span>
@@ -812,9 +900,45 @@
       </div>`;
   }
 
+  function filterSortRepos(repos) {
+    let list = [...(repos || [])];
+    if (repoLangFilter !== "all") {
+      list = list.filter((a) => (a.repo.language || "Other") === repoLangFilter);
+    }
+    if (repoPokeFilter !== "all") {
+      list = list.filter((a) => a.pokemon?.name === repoPokeFilter);
+    }
+
+    const quality = (a) =>
+      ((a.scores?.architecture || 0) + (a.scores?.testing || 0) + (a.scores?.maintenance || 0)) / 3;
+
+    list.sort((a, b) => {
+      if (repoSort === "stars") return (b.repo.stargazers || 0) - (a.repo.stargazers || 0);
+      if (repoSort === "activity") {
+        return new Date(b.repo.pushedAt) - new Date(a.repo.pushedAt);
+      }
+      if (repoSort === "quality") return quality(b) - quality(a);
+      if (repoSort === "pokemon") {
+        return String(a.pokemon?.name || "").localeCompare(String(b.pokemon?.name || ""));
+      }
+      // interesting: quality + activity + stars blend
+      const score = (x) => {
+        const days = (Date.now() - new Date(x.repo.pushedAt).getTime()) / 864e5;
+        const recency = Math.max(0, 1 - days / 365);
+        return quality(x) * 1.2 + Math.log10((x.repo.stargazers || 0) + 1) * 1.5 + recency * 3;
+      };
+      return score(b) - score(a);
+    });
+    return list;
+  }
+
   function renderReposTab(payload) {
-    const repos = payload.analyzedRepos || [];
-    if (!repos.length) return `<div class="pg-empty">No repositories in this analysis.</div>`;
+    const all = payload.analyzedRepos || [];
+    if (!all.length) return `<div class="pg-empty">No repositories in this analysis.</div>`;
+
+    const langs = [...new Set(all.map((a) => a.repo.language || "Other"))].sort();
+    const pokes = [...new Set(all.map((a) => a.pokemon?.name).filter(Boolean))].sort();
+    const repos = filterSortRepos(all);
 
     const cards = repos
       .map((item, i) => {
@@ -836,13 +960,12 @@
                   <span class="pg-repo-poke">${escapeHtml(pokemon.name)}</span>
                 </div>
                 <p class="pg-repo-blurb">${escapeHtml(pokemon.personality || pokemon.blurb)}</p>
-                ${
-                  pokemon.why
-                    ? `<p class="pg-repo-why-preview"><span class="pg-why-label">Why ${escapeHtml(
-                        pokemon.name
-                      )}?</span> ${escapeHtml(pokemon.why)}</p>`
-                    : ""
-                }
+                ${pokemon.why
+            ? `<p class="pg-repo-why-preview"><span class="pg-why-label">Why ${escapeHtml(
+              pokemon.name
+            )}?</span> ${escapeHtml(pokemon.why)}</p>`
+            : ""
+          }
               </div>
               <span class="pg-repo-chevron" aria-hidden="true">${open ? "▾" : "▸"}</span>
             </button>
@@ -853,13 +976,69 @@
       })
       .join("");
 
+    const langOpts = langs
+      .map(
+        (l) =>
+          `<option value="${escapeAttr(l)}" ${repoLangFilter === l ? "selected" : ""}>${escapeHtml(l)}</option>`
+      )
+      .join("");
+    const pokeOpts = pokes
+      .map(
+        (p) =>
+          `<option value="${escapeAttr(p)}" ${repoPokeFilter === p ? "selected" : ""}>${escapeHtml(p)}</option>`
+      )
+      .join("");
+
     return `
       <p class="pg-meta" style="margin-bottom:10px">
-        Showing ${repos.length} of ${payload.repoUniverseSize ?? "?"} owned non-fork repos
+        ${repos.length} shown · ${all.length} analyzed of ${payload.repoUniverseSize ?? "?"} owned non-fork
         ${payload.forkCount ? ` · ${payload.forkCount} forks excluded` : ""}
-        · tap a row for details
       </p>
-      <div class="pg-card pg-repo-card pg-anim-in">${cards}</div>`;
+      <div class="pg-repo-filters">
+        <label>Sort
+          <select data-repo-sort>
+            <option value="interesting" ${repoSort === "interesting" ? "selected" : ""}>Most interesting</option>
+            <option value="activity" ${repoSort === "activity" ? "selected" : ""}>Activity</option>
+            <option value="stars" ${repoSort === "stars" ? "selected" : ""}>Stars</option>
+            <option value="quality" ${repoSort === "quality" ? "selected" : ""}>Quality signals</option>
+            <option value="pokemon" ${repoSort === "pokemon" ? "selected" : ""}>Pokémon</option>
+          </select>
+        </label>
+        <label>Language
+          <select data-repo-lang>
+            <option value="all">All</option>
+            ${langOpts}
+          </select>
+        </label>
+        <label>Pokémon
+          <select data-repo-poke>
+            <option value="all">All</option>
+            ${pokeOpts}
+          </select>
+        </label>
+      </div>
+      <div class="pg-card pg-repo-card pg-anim-in">${cards || `<div class="pg-empty">No repos match these filters.</div>`}</div>`;
+  }
+
+  function wireRepoFilters(body) {
+    body.querySelector("[data-repo-sort]")?.addEventListener("change", (e) => {
+      repoSort = e.target.value;
+      body.innerHTML = renderReposTab(lastPayload);
+      wireRepoExpands(body);
+      wireRepoFilters(body);
+    });
+    body.querySelector("[data-repo-lang]")?.addEventListener("change", (e) => {
+      repoLangFilter = e.target.value;
+      body.innerHTML = renderReposTab(lastPayload);
+      wireRepoExpands(body);
+      wireRepoFilters(body);
+    });
+    body.querySelector("[data-repo-poke]")?.addEventListener("change", (e) => {
+      repoPokeFilter = e.target.value;
+      body.innerHTML = renderReposTab(lastPayload);
+      wireRepoExpands(body);
+      wireRepoFilters(body);
+    });
   }
 
   function wireRepoExpands(body) {
@@ -894,23 +1073,137 @@
     });
   }
 
+  function renderCompareTab(payload) {
+    const historyOpts = (historyList || [])
+      .filter((h) => h.login?.toLowerCase() !== currentUsername?.toLowerCase())
+      .slice(0, 8)
+      .map(
+        (h) =>
+          `<button type="button" class="pg-chip" data-compare-pick="${escapeAttr(h.login)}">@${escapeHtml(
+            h.login
+          )}</button>`
+      )
+      .join("");
+
+    let resultHtml = "";
+    if (compareLoading) {
+      resultHtml = `<div class="pg-state"><div class="pg-spinner"></div><p>Comparing public signals…</p></div>`;
+    } else if (compareError) {
+      resultHtml = `<div class="pg-empty">${escapeHtml(compareError)}</div>`;
+    } else if (compareResult) {
+      const { left, right, differences, similarities, disclaimer } = compareResult;
+      const diffCards = (differences || [])
+        .map(
+          (d) => `
+          <article class="pg-obs">
+            <div class="pg-obs-titles"><h4>${escapeHtml(d.title)}</h4>${kindBadge(d.kind)}</div>
+            <p>${linkPokemonTerms(d.body)}</p>
+            ${d.evidence?.length
+              ? `<ul class="pg-evidence">${d.evidence
+                .map((e) => `<li><span class="pg-check">✓</span>${escapeHtml(e)}</li>`)
+                .join("")}</ul>`
+              : ""
+            }
+          </article>`
+        )
+        .join("");
+      const simCards = (similarities || [])
+        .map(
+          (d) => `
+          <article class="pg-obs pg-obs-sim">
+            <div class="pg-obs-titles"><h4>${escapeHtml(d.title)}</h4>${kindBadge(d.kind)}</div>
+            <p>${linkPokemonTerms(d.body)}</p>
+          </article>`
+        )
+        .join("");
+
+      resultHtml = `
+        <div class="pg-compare-heads">
+          <div>
+            <p class="pg-handle">@${escapeHtml(left.user.login)}</p>
+            <p class="pg-glance-archetype">${escapeHtml(
+        left.glance?.headline || left.summary?.glanceHeadline || "-"
+      )}</p>
+          </div>
+          <div class="pg-compare-vs">vs</div>
+          <div>
+            <p class="pg-handle">@${escapeHtml(right.user.login)}</p>
+            <p class="pg-glance-archetype">${escapeHtml(
+        right.glance?.headline || right.summary?.glanceHeadline || "-"
+      )}</p>
+          </div>
+        </div>
+        <p class="pg-disclaimer">${escapeHtml(disclaimer)}</p>
+        <h3 class="pg-section-title">Meaningful differences</h3>
+        ${diffCards || `<p class="pg-section-lede">These profiles look surprisingly similar on the public sample.</p>`}
+        ${simCards
+          ? `<h3 class="pg-section-title" style="margin-top:16px">Where they rhyme</h3>${simCards}`
+          : ""
+        }`;
+    }
+
+    return `
+      <div class="pg-compare pg-anim-in">
+        <h3 class="pg-card-title">Compare profiles</h3>
+        <p class="pg-section-lede">
+          Contrast @${escapeHtml(payload.user.login)} with another public profile.
+          Descriptive only. Never a "who is better" scoreboard.
+        </p>
+        <div class="pg-compare-form">
+          <input type="text" class="pg-input" data-compare-input placeholder="GitHub username"
+            value="${escapeAttr(compareUsername)}" autocomplete="off" spellcheck="false" />
+          <button type="button" class="pg-btn pg-btn-primary" data-compare-run>Compare</button>
+        </div>
+        ${historyOpts
+        ? `<p class="pg-meta" style="margin:10px 0 6px">Recent on this device</p><div class="pg-chip-row">${historyOpts}</div>`
+        : ""
+      }
+        <div class="pg-compare-result">${resultHtml}</div>
+      </div>`;
+  }
+
+  function wireCompare(body) {
+    const input = body.querySelector("[data-compare-input]");
+    const stopGitHubKeys = (e) => {
+      e.stopPropagation();
+    };
+    input?.addEventListener("input", () => {
+      compareUsername = input.value;
+    });
+    ["keydown", "keyup", "keypress"].forEach((type) => {
+      input?.addEventListener(type, stopGitHubKeys);
+    });
+    input?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        runCompare(false);
+      }
+    });
+    body.querySelector("[data-compare-run]")?.addEventListener("click", () => runCompare(false));
+    body.querySelectorAll("[data-compare-pick]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        compareUsername = btn.getAttribute("data-compare-pick") || "";
+        runCompare(false);
+      });
+    });
+  }
+
   function renderAboutTab(payload) {
     const rem = payload?.rateLimitRemaining;
     return `
       <div class="pg-about pg-anim-in">
         <h3 class="pg-card-title">What PokéGit is</h3>
         <p class="pg-style">
-          A playful reading of <em>public</em> GitHub signals — not a résumé grade, IQ test, or seniority label.
-          Pokémon are visual shorthand for repository personality, not a game.
+          a chrome extension that analyzes public github profiles.
         </p>
         ${renderPokeLegend()}
         <div class="pg-card" style="margin-top:16px">
           <h3 class="pg-card-title">How to read this</h3>
           ${renderKindLegend()}
           <ul class="pg-about-list">
-            <li><strong>Observed</strong> — visible in public data (tests, CI, languages, push dates).</li>
-            <li><strong>Inferred</strong> — a reasonable interpretation of those patterns.</li>
-            <li><strong>Uncertain</strong> — public GitHub alone can’t settle it.</li>
+            <li><strong>Observed</strong>: visible in public data (tests, CI, languages, push dates).</li>
+            <li><strong>Inferred</strong>: a reasonable interpretation of those patterns.</li>
+            <li><strong>Uncertain</strong>: public GitHub alone can’t settle it.</li>
           </ul>
           <p class="pg-disclaimer">${escapeHtml(DISCLAIMER)}</p>
           ${rem != null ? `<p class="pg-meta">GitHub API remaining (approx): ${escapeHtml(String(rem))}</p>` : ""}
@@ -927,6 +1220,12 @@
       activeTab = "profile";
       showSettings = false;
       expandedRepos = new Set();
+      compareResult = null;
+      compareError = null;
+      compareUsername = "";
+      repoSort = "interesting";
+      repoLangFilter = "all";
+      repoPokeFilter = "all";
       // Leaving a profile page should never leave the overlay up
       if (!username) closePanel();
     }

@@ -12,6 +12,7 @@ import {
   buildEvidence,
   buildGlance,
   buildRepoDrilldown,
+  buildSurprises,
 } from "./insights.js";
 
 export { GitHubError };
@@ -133,6 +134,7 @@ export async function analyzeProfile(username, onProgress = () => {}) {
       languageSummary: [],
       observations: [],
       evidence: [],
+      surprises: [],
       glance: null,
       forkCount: 0,
       summary: emptySummary(reason),
@@ -158,6 +160,7 @@ export async function analyzeProfile(username, onProgress = () => {}) {
       languageSummary: [],
       observations: [],
       evidence: [],
+      surprises: [],
       glance: null,
       forkCount,
       summary: emptySummary(reason),
@@ -200,6 +203,7 @@ export async function analyzeProfile(username, onProgress = () => {}) {
   const aiAssistanceHeuristic = detectAiAssistance(analyzedRepos);
   const observations = buildObservations(analyzedRepos, profileScores, langs);
   const evidence = buildEvidence(analyzedRepos, profileScores);
+  const surprises = buildSurprises(analyzedRepos, profileScores, langs);
 
   const totalStars = analyzedRepos.reduce((s, a) => s + (a.repo.stargazers || 0), 0);
   const anySignal = analyzedRepos.some(
@@ -213,6 +217,7 @@ export async function analyzeProfile(username, onProgress = () => {}) {
     insufficientReason = "Not enough public information to generate a meaningful profile.";
   }
 
+  const analyzedAt = new Date().toISOString();
   const draft = {
     user,
     analyzedRepos,
@@ -222,11 +227,13 @@ export async function analyzeProfile(username, onProgress = () => {}) {
     aiAssistanceHeuristic,
     observations,
     evidence,
+    surprises,
     insufficient,
     insufficientReason,
     repoUniverseSize: repos.length,
     rateLimitRemaining: rem2 ?? rem1,
-    fetchedAt: new Date().toISOString(),
+    fetchedAt: analyzedAt,
+    analyzedAt,
   };
 
   onProgress("summary");

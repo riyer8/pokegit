@@ -1,12 +1,19 @@
 import { analyzeProfile, GitHubError } from "./lib/analyze.js";
 import { getKeyStatus, saveStoredKeys, clearStoredKeys } from "./lib/secrets.js";
-import { buildShareText } from "./lib/share.js";
+import { compareProfiles } from "./lib/compare.js";
+import {
+  getCachedPayload,
+  setCachedPayload,
+  rememberAnalysis,
+  loadHistory,
+  clearPayloadCache,
+  PERSIST_TTL_MS,
+} from "./lib/history.js";
 
-const cache = new Map();
-const CACHE_TTL_MS = 10 * 60 * 1000;
+const memoryCache = new Map();
+const MEMORY_TTL_MS = 15 * 60 * 1000;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // Only accept messages from this extension (content scripts / our pages)
   if (sender.id && sender.id !== chrome.runtime.id) {
     sendResponse({ ok: false, error: "Unauthorized" });
     return false;
@@ -14,7 +21,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "POKEGIT_ANALYZE_PROFILE" || message?.type === "POKEGIT_FETCH_PROFILE") {
     handleAnalyze(message.username, Boolean(message.force))
-      .then((payload) => sendResponse({ ok: true, payload }))
+      .then((result) => sendResponse({ ok: true, ...result }))
       .catch((err) =>
         sendResponse({
           ok: false,
@@ -28,14 +35,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === "POKEGIT_BUILD_SHARE") {
-    try {
-      const text = buildShareText(message.payload);
-      sendResponse({ ok: true, text });
-    } catch (err) {
-      sendResponse({ ok: false, error: safeError(err) });
-    }
-    return false;
+  if (message?.type === "POKEGIT_COMPARE_PROFILES") {
+    handleCompare(message.leftUsername, message.rightUsername, Boolean(message.force))
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((err) =>
+        sendResponse({
+          ok: false,
+          error: {
+            message: err.message || "Compare failed",
+            status: err.status || 0,
+          },
+        })
+      );
+    return true;
+  }
+
+  if (message?.type === "POKEGIT_GET_HISTORY") {
+    loadHistory()
+      .then((history) => sendResponse({ ok: true, history }))
+      .catch((err) => sendResponse({ ok: false, error: safeError(err) }));
+    return true;
   }
 
   if (message?.type === "POKEGIT_GET_KEY_STATUS") {
@@ -50,8 +69,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       githubToken: message.githubToken,
       openaiApiKey: message.openaiApiKey,
     })
-      .then((status) => {
-        cache.clear();
+      .then(async (status) => {
+        memoryCache.clear();
+        await clearPayloadCache();
         sendResponse({ ok: true, status });
       })
       .catch((err) => sendResponse({ ok: false, error: safeError(err) }));
@@ -60,8 +80,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "POKEGIT_CLEAR_KEYS") {
     clearStoredKeys()
-      .then((status) => {
-        cache.clear();
+      .then(async (status) => {
+        memoryCache.clear();
+        await clearPayloadCache();
         sendResponse({ ok: true, status });
       })
       .catch((err) => sendResponse({ ok: false, error: safeError(err) }));
@@ -69,9 +90,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "POKEGIT_CLEAR_CACHE") {
-    cache.clear();
-    sendResponse({ ok: true });
-    return false;
+    memoryCache.clear();
+    clearPayloadCache()
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => sendResponse({ ok: false, error: safeError(err) }));
+    return true;
   }
 });
 
@@ -85,12 +108,61 @@ async function handleAnalyze(username, force = false) {
   }
 
   const key = username.toLowerCase();
-  const hit = cache.get(key);
-  if (!force && hit && Date.now() - hit.at < CACHE_TTL_MS) {
-    return hit.payload;
+
+  if (!force) {
+    const mem = memoryCache.get(key);
+    if (mem && Date.now() - mem.at < MEMORY_TTL_MS) {
+      await rememberAnalysis(mem.payload, { fromCache: true });
+      return {
+        payload: { ...mem.payload, fromCache: true, cacheAgeMs: Date.now() - mem.at },
+        fromCache: true,
+      };
+    }
+    const disk = await getCachedPayload(key);
+    if (disk?.payload) {
+      memoryCache.set(key, { at: disk.at, payload: disk.payload });
+      await rememberAnalysis(disk.payload, { fromCache: true });
+      return {
+        payload: {
+          ...disk.payload,
+          fromCache: true,
+          cacheAgeMs: disk.ageMs,
+        },
+        fromCache: true,
+      };
+    }
   }
 
+  const previous = force ? (await getCachedPayload(key))?.payload : null;
   const payload = await analyzeProfile(key);
-  cache.set(key, { at: Date.now(), payload });
-  return payload;
+  payload.previousAnalyzedAt = previous?.analyzedAt || previous?.fetchedAt || null;
+  payload.fromCache = false;
+
+  memoryCache.set(key, { at: Date.now(), payload });
+  await setCachedPayload(key, payload);
+  await rememberAnalysis(payload, { fromCache: false });
+
+  return { payload, fromCache: false, cacheTtlMs: PERSIST_TTL_MS };
+}
+
+async function handleCompare(leftUsername, rightUsername, force = false) {
+  if (!leftUsername || !rightUsername) {
+    throw new GitHubError("Need two usernames to compare", 400);
+  }
+  if (leftUsername.toLowerCase() === rightUsername.toLowerCase()) {
+    throw new GitHubError("Pick two different profiles to compare", 400);
+  }
+
+  const [leftRes, rightRes] = await Promise.all([
+    handleAnalyze(leftUsername, force),
+    handleAnalyze(rightUsername, force),
+  ]);
+
+  const comparison = compareProfiles(leftRes.payload, rightRes.payload);
+  return {
+    comparison,
+    left: leftRes.payload,
+    right: rightRes.payload,
+    fromCache: Boolean(leftRes.fromCache && rightRes.fromCache),
+  };
 }

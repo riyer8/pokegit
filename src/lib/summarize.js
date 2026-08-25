@@ -241,25 +241,39 @@ export function heuristicSummary(analysis) {
       evidence: [`${top.repo.stargazers} stars`],
     });
   }
-  if (withTests.length / n >= 0.5) {
+  if (withTests.length / n >= 0.4) {
     strengths.push({
       text: `Testing shows up in ${withTests.length}/${n} analyzed repos.`,
       kind: "observed",
       evidence: withTests.slice(0, 3).map((a) => a.repo.name),
     });
   }
-  if (profileScores.maintenance >= 7) {
+  if (profileScores.maintenance >= 6.5) {
     strengths.push({
       text: `Maintenance stays warm (activity ${profileScores.activity}/10).`,
       kind: "inferred",
       evidence: [`Maintenance ${profileScores.maintenance}/10`],
     });
   }
-  if (strengths.length < 3 && langs[0]) {
+  if (profileScores.architecture >= 7) {
+    strengths.push({
+      text: `Structure signals look intentional (architecture ${profileScores.architecture}/10).`,
+      kind: "inferred",
+      evidence: [`Architecture ${profileScores.architecture}/10`],
+    });
+  }
+  if (langs[0]) {
     strengths.push({
       text: `Clear ${langs[0]} footprint in the sample.`,
       kind: "observed",
       evidence: [`Primary language: ${langs[0]}`],
+    });
+  }
+  if (!strengths.length) {
+    strengths.push({
+      text: `${analyzedRepos.length} owned non-fork repos selected for a closer look.`,
+      kind: "observed",
+      evidence: [`Sample size ${analyzedRepos.length}`],
     });
   }
 
@@ -270,7 +284,7 @@ export function heuristicSummary(analysis) {
   }));
 
   const concerns = [];
-  if (noTests.length / n >= 0.6) {
+  if (noTests.length / n >= 0.4) {
     concerns.push({
       text: `Limited testing infrastructure is visible (${noTests
         .slice(0, 2)
@@ -280,22 +294,51 @@ export function heuristicSummary(analysis) {
       evidence: noTests.slice(0, 2).map((a) => `No tests in ${a.repo.name}`),
     });
   }
-  if (profileScores.documentation <= 5) {
+  if (profileScores.documentation <= 6.5) {
     concerns.push({
       text: "Documentation is thinner than the rest of the profile.",
       kind: "observed",
       evidence: [`Docs score ${profileScores.documentation}/10`],
     });
   }
-  if (dormant.length >= Math.ceil(n / 2)) {
+  if (dormant.length >= 1) {
     concerns.push({
-      text: `Several projects look dormant (${dormant
+      text: `Some projects look dormant (${dormant
         .slice(0, 2)
         .map((a) => a.repo.name)
         .join(", ")}). That may mean finished, not failed.`,
       kind: "inferred",
       evidence: dormant.slice(0, 2).map((a) => a.repo.name),
     });
+  }
+  if ((profileScores.activity || 0) <= 5) {
+    concerns.push({
+      text: `Recent public activity looks quieter (activity ${profileScores.activity}/10).`,
+      kind: "observed",
+      evidence: [`Activity ${profileScores.activity}/10`],
+    });
+  }
+  if (!concerns.length) {
+    const weakest = [
+      ["documentation", profileScores.documentation],
+      ["testing", profileScores.testing],
+      ["maintenance", profileScores.maintenance],
+    ]
+      .filter(([, v]) => v != null)
+      .sort((a, b) => a[1] - b[1])[0];
+    if (weakest) {
+      concerns.push({
+        text: `${weakest[0][0].toUpperCase()}${weakest[0].slice(1)} is the softer public signal (${weakest[1]}/10). Worth a closer look, not a verdict.`,
+        kind: "inferred",
+        evidence: [`${weakest[0]} ${weakest[1]}/10`],
+      });
+    } else {
+      concerns.push({
+        text: "Public sample is thin enough that caveats matter more than confidence.",
+        kind: "uncertain",
+        evidence: [`Only ${n} repos analyzed`],
+      });
+    }
   }
 
   return pack(
@@ -361,7 +404,8 @@ Epistemic rules (critical):
 - When a Pokémon name is relevant, use the exact name so the UI can highlight it.
 - Sound human. Short sentences. No em dashes. No corporate mush.
 - Name concrete repos when useful.
-- concerns: only with evidence. Empty array is fine. Never say "bad engineer".
+- Always include at least 1 green-flag strength AND at least 1 red-flag concern when the sample has enough data. Soft caveats are fine for reds (thin docs, quiet activity, sparse tests). Never say "bad engineer".
+- concerns: only with evidence. Prefer a gentle, evidence-backed caveat over an empty list.
 - For dormant repos, allow "may simply be finished".
 - Never invent skill rankings, seniority labels, IQ, or personality diagnoses.
 - Prefer "public work suggests…" over "they are…".
@@ -411,7 +455,17 @@ Epistemic rules (critical):
     if (!parsed.glanceHeadline) parsed.glanceHeadline = fallback.glanceHeadline;
     if (!parsed.oneLiner) parsed.oneLiner = fallback.oneLiner;
 
-    return pack(parsed, "openai");
+    const packed = pack(parsed, "openai");
+    // Guarantee both green and red flags when the model omits one side
+    if (!packed.strengths.length && fallback.strengths.length) {
+      packed.strengths = fallback.strengths;
+      packed.greens = fallback.greens;
+    }
+    if (!packed.concerns.length && fallback.concerns.length) {
+      packed.concerns = fallback.concerns;
+      packed.reds = fallback.reds;
+    }
+    return packed;
   } catch (err) {
     console.warn("PokéGit OpenAI failed", err?.message || "error");
     return { ...fallback, unavailable: true, source: "heuristic" };
