@@ -5,6 +5,7 @@
 
 import { getOpenAIKey } from "./secrets.js";
 import { SCORE_DISCLAIMER } from "./score.js";
+import { activityAdjective, activityVibe } from "./activity.js";
 
 function daysSince(iso) {
   if (!iso) return 9999;
@@ -132,7 +133,7 @@ export function detectAiAssistance(analyzedRepos) {
 }
 
 function buildContext(analysis) {
-  const { user, profileScores, analyzedRepos, observations } = analysis;
+  const { user, profileScores, analyzedRepos, observations, activity } = analysis;
   const lines = [
     `Developer: ${user.login}`,
     user.name ? `Name: ${user.name}` : null,
@@ -145,6 +146,22 @@ function buildContext(analysis) {
     `Documentation: ${profileScores.documentation}`,
     `Complexity: ${profileScores.complexity}`,
     `Activity: ${profileScores.activity}`,
+    "",
+    "Recent public activity (from PushEvents, ~90d window when available):",
+    activity
+      ? [
+          `  label: ${activity.label}`,
+          `  approxCommits: ${activity.commitApprox}`,
+          `  reposTouched: ${(activity.reposTouched || [])
+            .slice(0, 5)
+            .map((r) => `${r.name}(~${r.commits})`)
+            .join(", ") || "none in events"}`,
+          `  newestSamplePushDays: ${activity.newestPushDays ?? "unknown"}`,
+          activity.sampleNote ? `  note: ${activity.sampleNote}` : null,
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : "  (unavailable)",
     "",
     "Precomputed observations (use as grounding, rewrite into sharper prose):",
   ].filter((x) => x !== null);
@@ -164,6 +181,7 @@ function buildContext(analysis) {
         `  language: ${repo.language || "unknown"}`,
         `  stars: ${repo.stargazers}, forks: ${repo.forks}, sizeKB: ${repo.size}`,
         `  lastPush: ${repo.pushedAt?.slice(0, 10)}, daysSince: ${Math.round(daysSince(repo.pushedAt))}, archived: ${Boolean(repo.archived)}`,
+        `  recentPublicCommitsApprox: ${signals.recentCommitApprox ?? signals.commitSampleCount ?? "unknown"}`,
         `  tests: ${signals.hasTests}, ci: ${signals.hasCi}, readme: ${signals.hasReadme}, docs: ${signals.hasDocs}`,
         `  scores: A${scores.architecture} T${scores.testing} M${scores.maintenance} D${scores.documentation} C${scores.complexity} Act${scores.activity}`,
         repo.description ? `  description: ${repo.description.slice(0, 140)}` : "  description: (none)",
@@ -177,12 +195,14 @@ function buildContext(analysis) {
 
 export function heuristicSummary(analysis) {
   const {
+    user,
     profileScores,
     analyzedRepos,
     insufficient,
     insufficientReason,
     aiAssistanceHeuristic,
     observations = [],
+    activity = null,
   } = analysis;
   if (insufficient) {
     return pack(
@@ -209,18 +229,31 @@ export function heuristicSummary(analysis) {
   const dormant = analyzedRepos.filter((a) => a.pokemon.name === "Snorlax");
   const byStars = [...analyzedRepos].sort((a, b) => b.repo.stargazers - a.repo.stargazers);
   const top = byStars[0];
+  const pace = activityAdjective(activity);
+  const vibe = activityVibe(activity);
 
   const styleBits = [];
   if (profileScores.testing >= 7.5) styleBits.push("test-oriented");
   if (profileScores.maintenance >= 7.5) styleBits.push("highly iterative");
   if (profileScores.complexity >= 7.5) styleBits.push("complexity-comfortable");
-  if (langs.length && langs.length <= 2) styleBits.push(`rooted in ${langs.join(" / ")}`);
+  if (langs.length && langs.length <= 2) styleBits.push(`rooted in ${langs.join("/")}`);
   else if (langs.length > 3) styleBits.push("polyglot across the public sample");
+  if (activity?.label === "hot" || activity?.label === "active") styleBits.push(vibe);
+  else if (activity?.label === "quiet" || activity?.label === "dormant") styleBits.push(vibe);
 
-  const glanceHeadline =
-    styleBits.length > 0
-      ? styleBits.slice(0, 2).join(", ").replace(/^\w/, (c) => c.toUpperCase()) + " engineer"
-      : "Public GitHub engineer";
+  let glanceHeadline;
+  if (styleBits.length && langs[0]) {
+    glanceHeadline = `${pace} ${styleBits[0]} ${langs.length >= 2 ? `${langs[0]}/${langs[1]}` : langs[0]} engineer`;
+  } else if (styleBits.length > 0) {
+    glanceHeadline = `${pace} ${styleBits.slice(0, 2).join(", ")} engineer`;
+  } else if (langs[0]) {
+    glanceHeadline = `${pace} ${langs[0]}-focused engineer`;
+  } else if (activity?.commitApprox > 0) {
+    glanceHeadline = `${pace} contributor (≈${activity.commitApprox} recent public commits)`;
+  } else {
+    const who = user?.name || (user?.login ? `@${user.login}` : null);
+    glanceHeadline = who ? `${who}'s public engineering silhouette` : "Open-source engineer with a thin public sample";
+  }
 
   const style =
     styleBits.length > 0
@@ -228,12 +261,29 @@ export function heuristicSummary(analysis) {
       : "Public work is mixed. Hard to pin one house style from this sample alone.";
 
   const oneLiner =
-    observations[0]?.title ||
-    (styleBits.length
-      ? `Consistent, ${styleBits[0]}${styleBits[1] ? ` and ${styleBits[1]}` : ""}.`
-      : "A partial silhouette from public repos.");
+    activity?.commitApprox >= 12
+      ? `≈${activity.commitApprox} recent public commits, ${vibe}.`
+      : observations[0]?.title ||
+        (styleBits.length
+          ? `${capitalize(styleBits[0])}${styleBits[1] ? ` and ${styleBits[1]}` : ""}, ${vibe}.`
+          : langs[0]
+            ? `${langs[0]}-heavy public sample, ${vibe}.`
+            : "A partial silhouette from public repos.");
 
   const strengths = [];
+  if (activity?.commitApprox >= 12) {
+    const topTouch = (activity.reposTouched || []).slice(0, 2).map((r) => r.name);
+    strengths.push({
+      text: `Recent public activity is tangible (≈${activity.commitApprox} commits${
+        topTouch.length ? ` across ${topTouch.join(", ")}` : ""
+      }).`,
+      kind: "observed",
+      evidence: [
+        `≈${activity.commitApprox} commits in public events`,
+        `Activity ${profileScores.activity}/10`,
+      ],
+    });
+  }
   if (top && top.repo.stargazers >= 30) {
     strengths.push({
       text: `${top.repo.name} carries real gravity (${top.repo.stargazers}★).`,
@@ -243,7 +293,10 @@ export function heuristicSummary(analysis) {
   }
   if (withTests.length / n >= 0.4) {
     strengths.push({
-      text: `Testing shows up in ${withTests.length}/${n} analyzed repos.`,
+      text: `Testing shows up in ${withTests.length}/${n} analyzed repos (${withTests
+        .slice(0, 2)
+        .map((a) => a.repo.name)
+        .join(", ")}).`,
       kind: "observed",
       evidence: withTests.slice(0, 3).map((a) => a.repo.name),
     });
@@ -285,11 +338,12 @@ export function heuristicSummary(analysis) {
 
   const concerns = [];
   if (noTests.length / n >= 0.4) {
+    const names = noTests
+      .slice(0, 2)
+      .map((a) => a.repo.name)
+      .join(", ");
     concerns.push({
-      text: `Limited testing infrastructure is visible (${noTests
-        .slice(0, 2)
-        .map((a) => a.repo.name)
-        .join(", ")}).`,
+      text: `${noTests.length}/${n} sampled repos show no clear test footprint (${names}).`,
       kind: "observed",
       evidence: noTests.slice(0, 2).map((a) => `No tests in ${a.repo.name}`),
     });
@@ -311,9 +365,12 @@ export function heuristicSummary(analysis) {
       evidence: dormant.slice(0, 2).map((a) => a.repo.name),
     });
   }
-  if ((profileScores.activity || 0) <= 5) {
+  if ((profileScores.activity || 0) <= 5 || activity?.label === "quiet" || activity?.label === "dormant") {
     concerns.push({
-      text: `Recent public activity looks quieter (activity ${profileScores.activity}/10).`,
+      text:
+        activity?.newestRepoName && activity?.newestPushDays != null
+          ? `Recent public activity looks quieter (last sample push ~${activity.newestPushDays}d ago on ${activity.newestRepoName}).`
+          : `Recent public activity looks quieter (activity ${profileScores.activity}/10).`,
       kind: "observed",
       evidence: [`Activity ${profileScores.activity}/10`],
     });
@@ -355,6 +412,10 @@ export function heuristicSummary(analysis) {
   );
 }
 
+function capitalize(s) {
+  return String(s || "").replace(/^\w/, (c) => c.toUpperCase());
+}
+
 function parseModelJson(raw) {
   if (!raw) return null;
   let text = raw.trim();
@@ -382,8 +443,8 @@ Product name is always PokéGit. Never invent other product names.
 
 Return ONLY JSON:
 {
-  "glanceHeadline": "short archetype, e.g. Product-minded full-stack engineer",
-  "oneLiner": "one quoted vibe sentence, under 12 words",
+  "glanceHeadline": "short archetype specific to THIS person, e.g. Active TypeScript builder shipping often",
+  "oneLiner": "one vibe sentence under 14 words, mention activity or stack when useful",
   "style": "1-2 short sentences on engineering style",
   "strengths": [{"text":"...","kind":"observed|inferred|uncertain","evidence":["..."]}],
   "interesting": [{"text":"...","kind":"observed|inferred|uncertain","evidence":["..."]}],
@@ -397,13 +458,15 @@ Return ONLY JSON:
 }
 
 Epistemic rules (critical):
-- OBSERVED: directly visible in public data (tests exist, CI file present, language counts, push dates).
+- OBSERVED: directly visible in public data (tests exist, CI file present, language counts, push dates, recent public commits).
 - INFERRED: reasonable interpretation (prefers X, prioritizes Y). Soften language.
 - UNCERTAIN: cannot tell from public GitHub (e.g. whether AI wrote the code, private work quality).
 - Prefer fewer sharp claims over many mushy ones.
+- glanceHeadline MUST be specific to this person: include their stack, activity pace, or a named habit. Never write generic filler like "Public GitHub engineer".
+- When recent commit estimates are present, weave them in (e.g. "≈20 recent public commits", "quieter lately").
+- Name concrete repos when useful. Avoid repeated stock phrases like "Limited testing infrastructure is visible"; say which repos lack tests instead.
 - When a Pokémon name is relevant, use the exact name so the UI can highlight it.
 - Sound human. Short sentences. No em dashes. No corporate mush.
-- Name concrete repos when useful.
 - Always include at least 1 green-flag strength AND at least 1 red-flag concern when the sample has enough data. Soft caveats are fine for reds (thin docs, quiet activity, sparse tests). Never say "bad engineer".
 - concerns: only with evidence. Prefer a gentle, evidence-backed caveat over an empty list.
 - For dormant repos, allow "may simply be finished".

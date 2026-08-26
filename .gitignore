@@ -5,14 +5,13 @@
 *.pem
 *.key
 
-# Generated from .env for local extension testing — contains live keys
+# Leftover generated secret files (no longer used)
 src/lib/secrets.local.js
 **/secrets.local.js
+src/lib/local.env
 
 # OS / editor
 .DS_Store
 *.log
 .idea/
 .vscode/
-
-.cursorignore

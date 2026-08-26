@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildImprovements } from "../src/lib/improve.js";
+import { buildImprovements, buildStarterPool, pickStarters } from "../src/lib/improve.js";
 import { buildObservations, buildEvidence, buildSurprises } from "../src/lib/insights.js";
 
 const scores = {
@@ -50,9 +50,29 @@ describe("buildImprovements", () => {
       analyzedRepos,
     });
     assert.ok(out.actions.length >= 2);
-    assert.ok(out.starters.length >= 2);
+    assert.equal(out.starters.length, 5);
     assert.ok(out.actions.every((a) => a.steps?.length && a.title));
+    assert.ok(out.starters.every((s) => s.title && s.pitch && s.leapFrom));
     assert.equal(JSON.stringify(out).includes("\u2014"), false);
+  });
+
+  it("rotates a fresh batch of 5 on refresh", () => {
+    const payload = {
+      user: { login: "demo", bio: "" },
+      profileScores: scores,
+      languageSummary: [
+        { name: "Python", percent: 80 },
+        { name: "TypeScript", percent: 20 },
+      ],
+      analyzedRepos,
+    };
+    const first = buildImprovements(payload).starters.map((s) => s.title);
+    const pool = buildStarterPool(payload);
+    const next = pickStarters(pool, { count: 5, seed: 3, excludeTitles: first });
+    assert.equal(next.length, 5);
+    assert.ok(pool.length >= 5);
+    const overlap = next.filter((s) => first.includes(s.title));
+    assert.ok(overlap.length < 5);
   });
 });
 

@@ -36,6 +36,15 @@
   const DISCLAIMER =
     "Experimental score based on publicly observable repository signals. Not an objective assessment of engineering ability.";
 
+  const SPARKLES_ICON = `
+    <svg class="pokegit-sparkle-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 3l1.62 4.45L18 9.07l-4.38 1.62L12 15.14l-1.62-4.45L6 9.07l4.38-1.62L12 3z"/>
+      <path d="M19.5 13.5l.72 1.98L22.2 16.2l-1.98.72-.72 1.98-.72-1.98-1.98-.72 1.98-.72.72-1.98z"/>
+      <path d="M5 15.2l.55 1.5 1.5.55-1.5.55L5 18.3l-.55-1.5-1.5-.55 1.5-.55L5 15.2z"/>
+    </svg>`;
+
+  const COMPARE_SUGGEST_LIMIT = 5;
+
   let pageMode = null; // "profile" | "repo" | null
   let currentUsername = null;
   let currentOwner = null;
@@ -53,6 +62,18 @@
   let compareResult = null;
   let compareLoading = false;
   let compareError = null;
+  let compareSuggestionPool = [];
+  let compareSuggestionsLoading = false;
+  let compareSuggestHighlight = 0;
+  let compareSuggestionsFor = null;
+  let comparePickerOpen = true;
+  let starterOverride = null;
+  let starterSeed = 0;
+  let starterSteer = "";
+  let starterDraft = "";
+  let starterNote = "";
+  let starterLoading = false;
+  let starterError = null;
   let repoSort = "interesting";
   let repoLangFilter = "all";
   let repoPokeFilter = "all";
@@ -236,7 +257,7 @@
       s = s.replace(re, (match) => {
         const p = POKE_BY_NAME[match];
         if (!p) return match;
-        const tip = `${p.emoji} ${p.name}: ${p.personality || p.meaning}`;
+        const tip = `${p.emoji} ${p.name} — ${p.personality || p.meaning}`;
         return `<span class="pg-poke-term" tabindex="0"><span class="pg-poke-term-label">${match}</span><span class="pg-tip" role="tooltip">${escapeHtml(tip)}</span></span>`;
       });
     }
@@ -246,6 +267,80 @@
   /** Escape text, then wrap Pokémon codewords with colored hover tips. */
   function linkPokemonTerms(text) {
     return formatRichText(text, { poke: true });
+  }
+
+  /**
+   * Shared panel-level tip floater. Inline .pg-tip nodes stay as the
+   * text source but are never shown in-flow (avoids scroll jump / clip).
+   */
+  function wireFloatingTips(root) {
+    const panel = state.shadow?.querySelector(".pokegit-panel");
+    if (!root || !panel) return;
+
+    let floater = panel.querySelector(".pg-tip-floater");
+    if (!floater) {
+      floater = document.createElement("div");
+      floater.className = "pg-tip pg-tip-floater";
+      floater.setAttribute("role", "tooltip");
+      floater.hidden = true;
+      panel.appendChild(floater);
+    }
+
+    const hide = () => {
+      floater.hidden = true;
+      floater.classList.remove("is-visible");
+      floater.textContent = "";
+    };
+
+    const show = (anchor, text) => {
+      if (!text) return;
+      floater.hidden = false;
+      floater.textContent = text;
+      floater.classList.add("is-fixed", "is-visible");
+      floater.dataset.placement = "above";
+
+      const ar = anchor.getBoundingClientRect();
+      const pr = panel.getBoundingClientRect();
+      const pad = 10;
+      const gap = 8;
+      // Force layout for size
+      floater.style.left = "0px";
+      floater.style.top = "0px";
+      const tipW = Math.min(floater.offsetWidth || 160, 200);
+      const tipH = floater.offsetHeight || 48;
+
+      let placement = "above";
+      let top = ar.top - pr.top - tipH - gap;
+      if (top < pad) {
+        placement = "below";
+        top = ar.bottom - pr.top + gap;
+      }
+      if (top + tipH > pr.height - pad) {
+        top = Math.max(pad, Math.min(top, pr.height - pad - tipH));
+      }
+
+      let left = ar.left - pr.left + ar.width / 2 - tipW / 2;
+      if (left + tipW > pr.width - pad) left = pr.width - pad - tipW;
+      if (left < pad) left = pad;
+
+      floater.dataset.placement = placement;
+      floater.style.left = `${Math.round(left)}px`;
+      floater.style.top = `${Math.round(top)}px`;
+    };
+
+    root.querySelectorAll(".pg-poke-term, .pg-repo-mark, .pg-repo-page-mark").forEach((el) => {
+      const tip = el.querySelector(".pg-tip");
+      if (!tip || el.dataset.tipWired) return;
+      el.dataset.tipWired = "1";
+      tip.classList.add("pg-tip-source");
+      const text = tip.textContent || el.getAttribute("data-tip") || "";
+      el.addEventListener("mouseenter", () => show(el, text));
+      el.addEventListener("focusin", () => show(el, text));
+      el.addEventListener("mouseleave", hide);
+      el.addEventListener("focusout", (e) => {
+        if (!el.contains(e.relatedTarget)) hide();
+      });
+    });
   }
 
   function renderPokeLegend() {
@@ -359,11 +454,12 @@
       <div class="pokegit-backdrop" data-close></div>
       <aside class="pokegit-panel" role="dialog" aria-modal="true" aria-label="PokéGit analysis" data-theme="light">
         <header class="pokegit-header">
-          <div>
-            <div class="pokegit-brand-name">Poké<span>Git</span></div>
-            <div class="pokegit-brand-sub" data-brand-sub>a chrome extension that analyzes public github profiles.</div>
-          </div>
+          <div class="pokegit-brand-name">Poké<span>Git</span></div>
           <div class="pokegit-header-actions">
+            <button type="button" class="pokegit-icon-btn pokegit-improve-btn" data-improvements title="Improvements" aria-label="Improvements" hidden>
+              <span class="pokegit-improve-btn-bg" aria-hidden="true"></span>
+              ${SPARKLES_ICON}
+            </button>
             <button type="button" class="pokegit-icon-btn" data-settings title="Settings" aria-label="Settings">⚙</button>
             <button type="button" class="pokegit-close" data-close aria-label="Close">×</button>
           </div>
@@ -373,10 +469,6 @@
           <button type="button" class="pokegit-tab" data-tab="repos" data-mode="profile" role="tab">Repos</button>
           <button type="button" class="pokegit-tab" data-tab="compare" data-mode="profile" role="tab">Compare</button>
           <button type="button" class="pokegit-tab" data-tab="overview" data-mode="repo" role="tab" hidden>Overview</button>
-          <button type="button" class="pokegit-tab" data-tab="about" data-mode="both" role="tab">About</button>
-        </nav>
-        <nav class="pokegit-tabs pokegit-tabs-secondary" role="tablist" data-tabs-secondary hidden>
-          <button type="button" class="pokegit-tab pokegit-tab-improve" data-tab="improvements" role="tab">Improvements</button>
         </nav>
         <div class="pokegit-body" data-body></div>
       </aside>
@@ -386,6 +478,16 @@
     wrap.querySelectorAll("[data-close]").forEach((el) => el.addEventListener("click", closePanel));
     wrap.querySelector("[data-settings]")?.addEventListener("click", () => {
       showSettings = !showSettings;
+      updateTabsVisibility();
+      renderBody();
+    });
+    wrap.querySelector("[data-improvements]")?.addEventListener("click", () => {
+      if (!canShowImprovements()) return;
+      showSettings = false;
+      activeTab = activeTab === "improvements" ? defaultTabForMode() : "improvements";
+      wrap.querySelectorAll("[data-tab]").forEach((t) =>
+        t.classList.toggle("is-active", t.getAttribute("data-tab") === activeTab)
+      );
       updateTabsVisibility();
       renderBody();
     });
@@ -442,13 +544,13 @@
     state.shadow = shadow;
   }
 
-  function updateBrandCopy() {
-    const sub = state.shadow?.querySelector("[data-brand-sub]");
-    if (!sub) return;
-    sub.textContent =
-      pageMode === "repo"
-        ? "a chrome extension that analyzes public github repositories."
-        : "a chrome extension that analyzes public github profiles.";
+  function canShowImprovements() {
+    return (
+      pageMode === "profile" &&
+      Boolean(lastPayload) &&
+      !lastPayload.insufficient &&
+      isOwnProfile()
+    );
   }
 
   function defaultTabForMode() {
@@ -457,32 +559,33 @@
 
   function updateTabsVisibility() {
     const tabs = state.shadow?.querySelector("[data-tabs]");
-    const secondary = state.shadow?.querySelector("[data-tabs-secondary]");
+    const improveBtn = state.shadow?.querySelector("[data-improvements]");
+    const own = canShowImprovements();
+    if (!own && activeTab === "improvements") {
+      activeTab = defaultTabForMode();
+    }
+    if (activeTab === "about") {
+      activeTab = defaultTabForMode();
+    }
+    const showingImprove = !showSettings && activeTab === "improvements";
+
     if (tabs) {
-      tabs.hidden = showSettings;
+      tabs.hidden = showSettings || showingImprove;
       tabs.querySelectorAll("[data-tab]").forEach((t) => {
         const mode = t.getAttribute("data-mode") || "both";
-        let visible = !showSettings;
+        let visible = !showSettings && !showingImprove;
         if (mode === "profile") visible = visible && pageMode === "profile";
         else if (mode === "repo") visible = visible && pageMode === "repo";
         t.hidden = !visible;
         t.classList.toggle("is-active", visible && t.getAttribute("data-tab") === activeTab);
       });
     }
-    const own =
-      !showSettings &&
-      pageMode === "profile" &&
-      Boolean(lastPayload) &&
-      !lastPayload.insufficient &&
-      isOwnProfile();
-    if (secondary) {
-      secondary.hidden = !own;
-      if (!own && activeTab === "improvements") {
-        activeTab = defaultTabForMode();
-      }
+    if (improveBtn) {
+      improveBtn.hidden = !own;
+      improveBtn.classList.toggle("is-active", own && showingImprove);
+      improveBtn.setAttribute("aria-pressed", own && showingImprove ? "true" : "false");
     }
     state.shadow?.querySelector("[data-settings]")?.classList.toggle("is-active", showSettings);
-    updateBrandCopy();
   }
 
   function openPanel(forceRefresh = false) {
@@ -497,7 +600,6 @@
     showSettings = false;
     activeTab = defaultTabForMode();
     applyTheme();
-    updateBrandCopy();
 
     state.host.hidden = false;
     state.host.style.display = "block";
@@ -589,6 +691,7 @@
       lastPayload = response.payload;
       await refreshKeyStatus();
       await refreshHistory();
+      if (pageMode === "profile") ensureCompareSuggestions();
     } catch (err) {
       lastError = err;
       lastPayload = null;
@@ -607,11 +710,13 @@
     const right = (compareUsername || "").trim().replace(/^@/, "");
     if (!currentUsername || !right) {
       compareError = "Enter a second GitHub username.";
+      comparePickerOpen = true;
       renderBody();
       return;
     }
     compareLoading = true;
     compareError = null;
+    comparePickerOpen = false;
     renderBody();
     try {
       const res = await extSend({
@@ -622,10 +727,12 @@
       });
       if (!res?.ok) throw new Error(res?.error?.message || "Compare failed");
       compareResult = res.comparison;
+      comparePickerOpen = false;
       await refreshHistory();
     } catch (err) {
       compareResult = null;
       compareError = err.message || "Compare failed";
+      comparePickerOpen = true;
     } finally {
       compareLoading = false;
       renderBody();
@@ -708,12 +815,9 @@
     }
 
     if (pageMode === "repo" || lastPayload.mode === "repo") {
-      if (activeTab === "about") {
-        body.innerHTML = renderAboutTab(lastPayload);
-      } else {
-        body.innerHTML = renderRepoOverview(lastPayload);
-        body.querySelector("[data-refresh]")?.addEventListener("click", () => analyze(true));
-      }
+      body.innerHTML = renderRepoOverview(lastPayload);
+      body.querySelector("[data-refresh]")?.addEventListener("click", () => analyze(true));
+      wireFloatingTips(body);
       return;
     }
 
@@ -729,9 +833,13 @@
       wireCompare(body);
     } else if (activeTab === "improvements" && isOwnProfile()) {
       body.innerHTML = renderImprovementsTab(lastPayload);
+      wireImprovements(body);
     } else {
-      body.innerHTML = renderAboutTab(lastPayload);
+      activeTab = defaultTabForMode();
+      body.innerHTML = renderProfileTab(lastPayload);
+      body.querySelector("[data-refresh]")?.addEventListener("click", () => analyze(true));
     }
+    wireFloatingTips(body);
   }
 
   async function renderSettingsView(body) {
@@ -739,36 +847,55 @@
     await refreshKeyStatus();
     const gh = keyStatus?.github;
     const oa = keyStatus?.openai;
-    const ghLocked = gh?.source === "local";
-    const oaLocked = oa?.source === "local";
-    const localNote = keyStatus?.usingLocalEnv
-      ? `<p class="pg-keys-status">Using keys from your local .env on this machine.</p>`
-      : `<p class="pg-keys-status is-warn">Paste keys below. They stay on this device only.</p>`;
+    const rem = lastPayload?.rateLimitRemaining;
+    const isRepo = pageMode === "repo" || lastPayload?.mode === "repo";
 
     body.innerHTML = `
       <div class="pg-keys">
         <h3 class="pg-card-title">Settings</h3>
         <p class="pg-keys-lede">GitHub token helps with rate limits. OpenAI powers richer insights.</p>
-        ${localNote}
+        <p class="pg-keys-status">Paste keys below. They stay in this browser on this device only. They are never written into the project, never committed, and never Chrome-synced.</p>
+        <p class="pg-keys-status">${gh?.present ? "GitHub token is saved." : "GitHub token is not saved yet."} ${
+      oa?.present ? "OpenAI key is saved." : "OpenAI key is not saved yet."
+    }</p>
         <div class="pg-field">
           <label for="pg-github">GitHub token</label>
-          <input id="pg-github" type="password" autocomplete="off" placeholder="${ghLocked ? "Loaded from .env" : gh?.hint || "ghp_… or github_pat_…"
-      }" ${ghLocked ? "disabled" : ""} />
+          <input id="pg-github" type="password" autocomplete="off" placeholder="${gh?.present ? "Leave blank to keep the saved token" : "ghp_… or github_pat_…"}" />
         </div>
         <div class="pg-field">
           <label for="pg-openai">OpenAI API key</label>
-          <input id="pg-openai" type="password" autocomplete="off" placeholder="${oaLocked ? "Loaded from .env" : oa?.hint || "sk-…"
-      }" ${oaLocked ? "disabled" : ""} />
+          <input id="pg-openai" type="password" autocomplete="off" placeholder="${oa?.present ? "Leave blank to keep the saved key" : "sk-…"}" />
         </div>
         <div class="pg-keys-actions">
-          ${ghLocked && oaLocked
-        ? `<button type="button" class="pg-btn pg-btn-primary" data-back>Back</button>`
-        : `<button type="button" class="pg-btn pg-btn-primary" data-save>Save keys</button>
-                 <button type="button" class="pg-btn pg-btn-ghost" data-clear>Clear saved</button>
-                 <button type="button" class="pg-btn pg-btn-ghost" data-back>Back</button>`
-      }
+          <button type="button" class="pg-btn pg-btn-primary" data-save>Save keys</button>
+          <button type="button" class="pg-btn pg-btn-ghost" data-clear>Clear saved</button>
+          <button type="button" class="pg-btn pg-btn-ghost" data-back>Back</button>
         </div>
         <p class="pg-keys-msg" data-msg></p>
+
+        <section class="pg-settings-about">
+          <h3 class="pg-card-title">About PokéGit</h3>
+          <p class="pg-style">
+            ${
+              isRepo
+                ? "a chrome extension that analyzes public github repositories (and profiles)."
+                : "a chrome extension that analyzes public github profiles."
+            }
+          </p>
+          ${renderKindLegend()}
+          <ul class="pg-about-list">
+            <li><strong>Observed</strong>: visible in public data (tests, CI, languages, push dates, recent public commits).</li>
+            <li><strong>Inferred</strong>: a reasonable interpretation of those patterns.</li>
+            <li><strong>Uncertain</strong>: public GitHub alone can’t settle it.</li>
+            ${
+              isRepo
+                ? `<li><strong>Repo mode</strong>: blends README text with root layout, manifests, languages, and workflow files. Never a private-code audit.</li>`
+                : ""
+            }
+          </ul>
+          <p class="pg-disclaimer">${escapeHtml(DISCLAIMER)}</p>
+          ${rem != null ? `<p class="pg-meta">GitHub API remaining (approx): ${escapeHtml(String(rem))}</p>` : ""}
+        </section>
         ${renderPokeLegend()}
       </div>`;
 
@@ -786,8 +913,17 @@
       const githubInput = body.querySelector("#pg-github");
       const openaiInput = body.querySelector("#pg-openai");
       const payload = {};
-      if (!ghLocked && githubInput) payload.githubToken = githubInput.value;
-      if (!oaLocked && openaiInput) payload.openaiApiKey = openaiInput.value;
+      const ghVal = githubInput?.value?.trim();
+      const oaVal = openaiInput?.value?.trim();
+      if (ghVal) payload.githubToken = ghVal;
+      if (oaVal) payload.openaiApiKey = oaVal;
+      if (!payload.githubToken && !payload.openaiApiKey) {
+        if (msg) {
+          msg.style.color = "#a12a0a";
+          msg.textContent = "Paste a key to save. Blank fields keep whatever is already stored.";
+        }
+        return;
+      }
       const res = await extSend({ type: "POKEGIT_SAVE_KEYS", ...payload });
       if (!res?.ok) {
         if (msg) {
@@ -1571,23 +1707,23 @@
   }
 
   function wireRepoFilters(body) {
-    body.querySelector("[data-repo-sort]")?.addEventListener("change", (e) => {
-      repoSort = e.target.value;
+    const rewire = () => {
       body.innerHTML = renderReposTab(lastPayload);
       wireRepoExpands(body);
       wireRepoFilters(body);
+      wireFloatingTips(body);
+    };
+    body.querySelector("[data-repo-sort]")?.addEventListener("change", (e) => {
+      repoSort = e.target.value;
+      rewire();
     });
     body.querySelector("[data-repo-lang]")?.addEventListener("change", (e) => {
       repoLangFilter = e.target.value;
-      body.innerHTML = renderReposTab(lastPayload);
-      wireRepoExpands(body);
-      wireRepoFilters(body);
+      rewire();
     });
     body.querySelector("[data-repo-poke]")?.addEventListener("change", (e) => {
       repoPokeFilter = e.target.value;
-      body.innerHTML = renderReposTab(lastPayload);
-      wireRepoExpands(body);
-      wireRepoFilters(body);
+      rewire();
     });
   }
 
@@ -1623,17 +1759,149 @@
     });
   }
 
-  function renderCompareTab(payload) {
-    const historyOpts = (historyList || [])
-      .filter((h) => h.login?.toLowerCase() !== currentUsername?.toLowerCase())
-      .slice(0, 8)
-      .map(
-        (h) =>
-          `<button type="button" class="pg-chip" data-compare-pick="${escapeAttr(h.login)}">@${escapeHtml(
-            h.login
-          )}</button>`
-      )
+  function githubAvatarUrl(login) {
+    if (!login) return "";
+    return `https://github.com/${encodeURIComponent(login)}.png?size=80`;
+  }
+
+  function filterCompareSuggestions(pool, { query = "", excludeLogin = "", limit = COMPARE_SUGGEST_LIMIT } = {}) {
+    const q = String(query || "")
+      .trim()
+      .replace(/^@/, "")
+      .toLowerCase();
+    const exclude = String(excludeLogin || "")
+      .trim()
+      .toLowerCase();
+    let list = (pool || []).filter((u) => u?.login && u.login.toLowerCase() !== exclude);
+    if (q) {
+      list = list.filter((u) => {
+        const login = u.login.toLowerCase();
+        const name = String(u.name || "").toLowerCase();
+        return login.includes(q) || name.includes(q);
+      });
+      list.sort((a, b) => {
+        const aLogin = a.login.toLowerCase();
+        const bLogin = b.login.toLowerCase();
+        const aPrefix = aLogin.startsWith(q) ? 0 : 1;
+        const bPrefix = bLogin.startsWith(q) ? 0 : 1;
+        if (aPrefix !== bPrefix) return aPrefix - bPrefix;
+        if (a.kind === "you" && b.kind !== "you") return -1;
+        if (b.kind === "you" && a.kind !== "you") return 1;
+        return aLogin.localeCompare(bLogin);
+      });
+    }
+    return list.slice(0, Math.max(0, Number(limit) || COMPARE_SUGGEST_LIMIT));
+  }
+
+  function shouldShowCompareSuggestions() {
+    if (compareLoading) return false;
+    if (compareResult && !comparePickerOpen) return false;
+    return true;
+  }
+
+  function visibleCompareSuggestions() {
+    return filterCompareSuggestions(compareSuggestionPool, {
+      query: compareUsername,
+      excludeLogin: currentUsername,
+      limit: COMPARE_SUGGEST_LIMIT,
+    });
+  }
+
+  function openComparePicker() {
+    comparePickerOpen = true;
+    const picker = state.shadow?.querySelector("[data-compare-picker]");
+    const list = state.shadow?.querySelector("[data-compare-suggests]");
+    picker?.classList.remove("is-settled");
+    if (list) list.hidden = false;
+    paintCompareSuggestions();
+  }
+
+  async function ensureCompareSuggestions() {
+    loggedInUser = detectLoggedInUser();
+    if (!loggedInUser) {
+      compareSuggestionPool = [];
+      compareSuggestionsFor = null;
+      compareSuggestionsLoading = false;
+      return;
+    }
+    const key = loggedInUser.toLowerCase();
+    if (compareSuggestionsFor === key && compareSuggestionPool.length) return;
+    if (compareSuggestionsLoading) return;
+
+    compareSuggestionsLoading = true;
+    paintCompareSuggestions();
+    try {
+      const res = await extSend({ type: "POKEGIT_GET_COMPARE_SUGGESTIONS", viewerLogin: loggedInUser });
+      if (res?.ok) {
+        compareSuggestionPool = res.pool || [];
+        compareSuggestionsFor = key;
+      } else {
+        compareSuggestionPool = [
+          { login: loggedInUser, name: null, avatarUrl: githubAvatarUrl(loggedInUser), kind: "you" },
+        ];
+        compareSuggestionsFor = key;
+      }
+    } catch {
+      compareSuggestionPool = [
+        { login: loggedInUser, name: null, avatarUrl: githubAvatarUrl(loggedInUser), kind: "you" },
+      ];
+      compareSuggestionsFor = key;
+    } finally {
+      compareSuggestionsLoading = false;
+      paintCompareSuggestions();
+    }
+  }
+
+  function renderCompareSuggestionItems() {
+    const visible = visibleCompareSuggestions();
+    if (compareSuggestHighlight >= visible.length) compareSuggestHighlight = 0;
+    if (!visible.length && compareSuggestionsLoading) {
+      return `<li class="pg-suggest-skel">Looking up people you follow…</li>`;
+    }
+    if (!visible.length) {
+      const typed = (compareUsername || "").trim().replace(/^@/, "");
+      if (typed) {
+        return `<li class="pg-suggest-empty">No matches. Compare @${escapeHtml(typed)} anyway.</li>`;
+      }
+      if (!detectLoggedInUser()) {
+        return `<li class="pg-suggest-empty">Type a GitHub username to compare.</li>`;
+      }
+      return `<li class="pg-suggest-empty">Nobody to suggest yet. Type a username.</li>`;
+    }
+    return visible
+      .map((u, i) => {
+        const tag = u.kind === "you" ? "You" : "Following";
+        const name = u.name ? `<em>${escapeHtml(u.name)}</em>` : "";
+        return `
+          <li>
+            <button type="button" class="pg-suggest-row ${i === compareSuggestHighlight ? "is-active" : ""}"
+              data-compare-pick="${escapeAttr(u.login)}" role="option" aria-selected="${i === compareSuggestHighlight ? "true" : "false"}">
+              <img class="pg-suggest-avatar" src="${escapeAttr(u.avatarUrl || githubAvatarUrl(u.login))}" alt="" width="32" height="32" />
+              <span class="pg-suggest-id">
+                <strong>${escapeHtml(u.login)}</strong>
+                ${name}
+              </span>
+              <span class="pg-suggest-tag pg-suggest-tag-${escapeAttr(u.kind)}">${tag}</span>
+            </button>
+          </li>`;
+      })
       .join("");
+  }
+
+  function paintCompareSuggestions() {
+    const list = state.shadow?.querySelector("[data-compare-suggests]");
+    if (!list || activeTab !== "compare") return;
+    list.innerHTML = renderCompareSuggestionItems();
+    list.querySelectorAll("[data-compare-pick]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        compareUsername = btn.getAttribute("data-compare-pick") || "";
+        runCompare(false);
+      });
+    });
+  }
+
+  function renderCompareTab(payload) {
+    ensureCompareSuggestions();
 
     let resultHtml = "";
     if (compareLoading) {
@@ -1641,73 +1909,98 @@
     } else if (compareError) {
       resultHtml = `<div class="pg-empty">${escapeHtml(compareError)}</div>`;
     } else if (compareResult) {
-      const { left, right, differences, similarities, disclaimer } = compareResult;
-      const diffCards = (differences || [])
+      const { left, right, lenses, differences, disclaimer } = compareResult;
+      const cards = (lenses || differences || [])
         .map(
-          (d) => `
-          <article class="pg-obs">
-            <div class="pg-obs-titles"><h4>${escapeHtml(d.title)}</h4>${kindBadge(d.kind)}</div>
-            <p>${linkPokemonTerms(d.body)}</p>
-            ${d.evidence?.length
-              ? `<ul class="pg-evidence">${d.evidence
-                .map((e) => `<li><span class="pg-check">✓</span>${escapeHtml(e)}</li>`)
-                .join("")}</ul>`
-              : ""
+          (d, i) => `
+          <article class="pg-compare-lens pg-anim-fade" style="--pg-i:${i}">
+            <div class="pg-obs-head">
+              <span class="pg-obs-icon" aria-hidden="true">${d.icon || "✦"}</span>
+              <div class="pg-obs-titles">
+                <h4>${escapeHtml(d.title)}</h4>
+                ${kindBadge(d.kind)}
+              </div>
+            </div>
+            ${
+              d.sides
+                ? `<div class="pg-compare-sides">
+                    <p class="pg-compare-side">${linkPokemonTerms(d.sides.left)}</p>
+                    <p class="pg-compare-side">${linkPokemonTerms(d.sides.right)}</p>
+                  </div>`
+                : `<p>${linkPokemonTerms(d.body)}</p>`
             }
-          </article>`
-        )
-        .join("");
-      const simCards = (similarities || [])
-        .map(
-          (d) => `
-          <article class="pg-obs pg-obs-sim">
-            <div class="pg-obs-titles"><h4>${escapeHtml(d.title)}</h4>${kindBadge(d.kind)}</div>
-            <p>${linkPokemonTerms(d.body)}</p>
+            ${
+              d.evidence?.length
+                ? `<ul class="pg-evidence">${d.evidence
+                    .map((e) => `<li><span class="pg-check">✓</span>${escapeHtml(e)}</li>`)
+                    .join("")}</ul>`
+                : ""
+            }
           </article>`
         )
         .join("");
 
       resultHtml = `
         <div class="pg-compare-heads">
-          <div>
-            <p class="pg-handle">@${escapeHtml(left.user.login)}</p>
-            <p class="pg-glance-archetype">${escapeHtml(
-        left.glance?.headline || left.summary?.glanceHeadline || "-"
-      )}</p>
+          <div class="pg-compare-person">
+            <img class="pg-suggest-avatar pg-compare-head-avatar" src="${escapeAttr(
+              left.user.avatarUrl || githubAvatarUrl(left.user.login)
+            )}" alt="" width="40" height="40" />
+            <div>
+              <p class="pg-handle">@${escapeHtml(left.user.login)}</p>
+              <p class="pg-glance-archetype">${escapeHtml(
+                left.glance?.headline || left.summary?.glanceHeadline || "-"
+              )}</p>
+            </div>
           </div>
           <div class="pg-compare-vs">vs</div>
-          <div>
-            <p class="pg-handle">@${escapeHtml(right.user.login)}</p>
-            <p class="pg-glance-archetype">${escapeHtml(
-        right.glance?.headline || right.summary?.glanceHeadline || "-"
-      )}</p>
+          <div class="pg-compare-person">
+            <img class="pg-suggest-avatar pg-compare-head-avatar" src="${escapeAttr(
+              right.user.avatarUrl || githubAvatarUrl(right.user.login)
+            )}" alt="" width="40" height="40" />
+            <div>
+              <p class="pg-handle">@${escapeHtml(right.user.login)}</p>
+              <p class="pg-glance-archetype">${escapeHtml(
+                right.glance?.headline || right.summary?.glanceHeadline || "-"
+              )}</p>
+            </div>
           </div>
         </div>
-        <p class="pg-disclaimer">${escapeHtml(disclaimer)}</p>
-        <h3 class="pg-section-title">Meaningful differences</h3>
-        ${diffCards || `<p class="pg-section-lede">These profiles look surprisingly similar on the public sample.</p>`}
-        ${simCards
-          ? `<h3 class="pg-section-title" style="margin-top:16px">Where they rhyme</h3>${simCards}`
-          : ""
-        }`;
+        ${cards || `<p class="pg-section-lede">Not enough public signal to contrast these two yet.</p>`}
+        <p class="pg-disclaimer">${escapeHtml(disclaimer)}</p>`;
     }
+
+    const showSuggests = shouldShowCompareSuggestions();
+    const settled = Boolean(compareResult) && !showSuggests;
 
     return `
       <div class="pg-compare pg-anim-in">
-        <h3 class="pg-card-title">Compare profiles</h3>
-        <p class="pg-section-lede">
-          Contrast @${escapeHtml(payload.user.login)} with another public profile.
-          Descriptive only. Never a "who is better" scoreboard.
-        </p>
-        <div class="pg-compare-form">
-          <input type="text" class="pg-input" data-compare-input placeholder="GitHub username"
-            value="${escapeAttr(compareUsername)}" autocomplete="off" spellcheck="false" />
-          <button type="button" class="pg-btn pg-btn-primary" data-compare-run>Compare</button>
+        <header class="pg-compare-intro">
+          <h3 class="pg-card-title">Compare</h3>
+          ${
+            settled
+              ? ""
+              : `<p class="pg-section-lede">
+            Uniqueness, activity, and whimsy vs another public profile.
+            Descriptive only. Never a ranking.
+          </p>`
+          }
+        </header>
+        <div class="pg-compare-picker ${settled ? "is-settled" : ""}" data-compare-picker>
+          <label class="pg-compare-search">
+            <span class="pg-compare-at" aria-hidden="true">@</span>
+            <input type="text" class="pg-input" data-compare-input placeholder="username"
+              value="${escapeAttr(compareUsername)}" autocomplete="off" spellcheck="false"
+              role="combobox" aria-autocomplete="list" aria-controls="pg-compare-suggests"
+              aria-expanded="${showSuggests ? "true" : "false"}" />
+            <button type="button" class="pg-btn pg-btn-primary" data-compare-run>Compare</button>
+          </label>
+          <ul class="pg-suggest" id="pg-compare-suggests" data-compare-suggests role="listbox" ${
+            showSuggests ? "" : "hidden"
+          }>
+            ${showSuggests ? renderCompareSuggestionItems() : ""}
+          </ul>
         </div>
-        ${historyOpts
-        ? `<p class="pg-meta" style="margin:10px 0 6px">Recent on this device</p><div class="pg-chip-row">${historyOpts}</div>`
-        : ""
-      }
         <div class="pg-compare-result">${resultHtml}</div>
       </div>`;
   }
@@ -1717,25 +2010,45 @@
     const stopGitHubKeys = (e) => {
       e.stopPropagation();
     };
-    input?.addEventListener("input", () => {
-      compareUsername = input.value;
-    });
+    const syncFromInput = () => {
+      compareUsername = input?.value || "";
+      compareSuggestHighlight = 0;
+      openComparePicker();
+    };
+    input?.addEventListener("focus", () => openComparePicker());
+    input?.addEventListener("input", syncFromInput);
     ["keydown", "keyup", "keypress"].forEach((type) => {
       input?.addEventListener(type, stopGitHubKeys);
     });
     input?.addEventListener("keydown", (e) => {
+      const visible = visibleCompareSuggestions();
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        if (!visible.length) return;
+        compareSuggestHighlight = (compareSuggestHighlight + 1) % visible.length;
+        paintCompareSuggestions();
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        if (!visible.length) return;
+        compareSuggestHighlight = (compareSuggestHighlight - 1 + visible.length) % visible.length;
+        paintCompareSuggestions();
+        return;
+      }
       if (e.key === "Enter") {
         e.preventDefault();
+        const pick = visible[compareSuggestHighlight];
+        if (pick && !(compareUsername || "").trim()) {
+          compareUsername = pick.login;
+        } else if (pick && pick.login.toLowerCase().startsWith((compareUsername || "").trim().replace(/^@/, "").toLowerCase())) {
+          compareUsername = pick.login;
+        }
         runCompare(false);
       }
     });
     body.querySelector("[data-compare-run]")?.addEventListener("click", () => runCompare(false));
-    body.querySelectorAll("[data-compare-pick]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        compareUsername = btn.getAttribute("data-compare-pick") || "";
-        runCompare(false);
-      });
-    });
+    paintCompareSuggestions();
   }
 
   function renderImprovementsTab(payload) {
@@ -1777,9 +2090,12 @@
       )
       .join("");
 
-    const starters = (pack.starters || [])
-      .map(
-        (s, i) => `
+    const starterPack = starterOverride?.starters || pack.starters || [];
+    const startersHtml = starterLoading
+      ? `<div class="pg-state pg-starter-loading"><div class="pg-spinner"></div><p>Inventing five leaps…</p></div>`
+      : starterPack
+          .map(
+            (s, i) => `
         <article class="pg-starter-card pg-anim-fade" style="--pg-i:${i + 2}">
           <div class="pg-starter-emoji" aria-hidden="true">${s.emoji || "✦"}</div>
           <div>
@@ -1791,8 +2107,24 @@
               .join("")}</div>
           </div>
         </article>`
-      )
-      .join("");
+          )
+          .join("");
+
+    const steerThread =
+      starterSteer || starterNote
+        ? `<div class="pg-steer-thread">
+            ${
+              starterSteer
+                ? `<p class="pg-steer-bubble is-user">${escapeHtml(starterSteer)}</p>`
+                : ""
+            }
+            ${
+              starterNote
+                ? `<p class="pg-steer-bubble is-bot">${escapeHtml(starterNote)}</p>`
+                : ""
+            }
+          </div>`
+        : "";
 
     return `
       <div class="pg-improve pg-anim-in">
@@ -1807,44 +2139,92 @@
           </p>
           <h4 class="pg-improve-section">Do these next</h4>
           <div class="pg-improve-list">${actions}</div>
-          <h4 class="pg-improve-section">Starter projects to leap from</h4>
-          <p class="pg-section-lede">Small public projects you can spin up this week using what you already know.</p>
-          <div class="pg-starter-list">${starters}</div>
+          <div class="pg-starter-head">
+            <h4 class="pg-improve-section">Starter projects to leap from</h4>
+            <button type="button" class="pg-btn pg-btn-ghost pg-refresh" data-starters-refresh title="Refresh starter ideas" ${
+              starterLoading ? "disabled" : ""
+            }>↻</button>
+          </div>
+          <p class="pg-section-lede">Five weekend-scale public projects that bounce off what you already know. Refresh for a new batch, or tell PokéGit where you want to steer.</p>
+          <div class="pg-steer">
+            ${steerThread}
+            <div class="pg-steer-form">
+              <textarea class="pg-input" data-steer-input rows="2" maxlength="280"
+                placeholder="What kinds of projects do you want to steer toward?"
+                ${starterLoading ? "disabled" : ""}>${escapeHtml(starterDraft)}</textarea>
+              <button type="button" class="pg-btn pg-btn-primary" data-steer-send ${
+                starterLoading ? "disabled" : ""
+              }>Steer</button>
+            </div>
+            ${starterError ? `<p class="pg-steer-error">${escapeHtml(starterError)}</p>` : ""}
+          </div>
+          <div class="pg-starter-list" data-starter-list>${startersHtml}</div>
         </div>
       </div>`;
   }
 
-  function renderAboutTab(payload) {
-    const rem = payload?.rateLimitRemaining;
-    const isRepo = pageMode === "repo" || payload?.mode === "repo";
-    return `
-      <div class="pg-about pg-anim-in">
-        <h3 class="pg-card-title">What PokéGit is</h3>
-        <p class="pg-style">
-          ${
-            isRepo
-              ? "a chrome extension that analyzes public github repositories (and profiles)."
-              : "a chrome extension that analyzes public github profiles."
-          }
-        </p>
-        ${renderPokeLegend()}
-        <div class="pg-card" style="margin-top:16px">
-          <h3 class="pg-card-title">How to read this</h3>
-          ${renderKindLegend()}
-          <ul class="pg-about-list">
-            <li><strong>Observed</strong>: visible in public data (tests, CI, languages, push dates).</li>
-            <li><strong>Inferred</strong>: a reasonable interpretation of those patterns.</li>
-            <li><strong>Uncertain</strong>: public GitHub alone can’t settle it.</li>
-            ${
-              isRepo
-                ? `<li><strong>Repo mode</strong>: blends README text with root layout, manifests, languages, and workflow files. Never a private-code audit.</li>`
-                : ""
-            }
-          </ul>
-          <p class="pg-disclaimer">${escapeHtml(DISCLAIMER)}</p>
-          ${rem != null ? `<p class="pg-meta">GitHub API remaining (approx): ${escapeHtml(String(rem))}</p>` : ""}
-        </div>
-      </div>`;
+  function currentStarterTitles(payload) {
+    const list = starterOverride?.starters || payload?.improvements?.starters || [];
+    return list.map((s) => s.title).filter(Boolean);
+  }
+
+  async function refreshStarters(payload, { steer = starterSteer, fromChat = false } = {}) {
+    if (starterLoading || !currentUsername) return;
+    const direction = String(steer || "").trim();
+    if (fromChat && !direction) {
+      starterError = "Say the kinds of projects you want to steer toward.";
+      renderBody();
+      return;
+    }
+    starterLoading = true;
+    starterError = null;
+    if (fromChat) {
+      starterSteer = direction;
+      starterDraft = "";
+    }
+    starterSeed += 1;
+    renderBody();
+    try {
+      const res = await extSend({
+        type: "POKEGIT_REFRESH_STARTERS",
+        username: currentUsername,
+        steer: direction,
+        seed: starterSeed,
+        previousTitles: currentStarterTitles(payload),
+      });
+      if (!res?.ok) throw new Error(res?.error || "Couldn't refresh starters.");
+      starterOverride = { starters: res.starters || [], source: res.source };
+      starterNote = res.note || "";
+    } catch (err) {
+      starterError = err.message || "Couldn't refresh starters.";
+    } finally {
+      starterLoading = false;
+      renderBody();
+    }
+  }
+
+  function wireImprovements(body) {
+    const payload = lastPayload;
+    body.querySelector("[data-starters-refresh]")?.addEventListener("click", () => {
+      refreshStarters(payload);
+    });
+    const input = body.querySelector("[data-steer-input]");
+    const stopGitHubKeys = (e) => e.stopPropagation();
+    ["keydown", "keyup", "keypress"].forEach((type) => {
+      input?.addEventListener(type, stopGitHubKeys);
+    });
+    input?.addEventListener("input", () => {
+      starterDraft = input.value;
+    });
+    input?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        refreshStarters(payload, { steer: input.value, fromChat: true });
+      }
+    });
+    body.querySelector("[data-steer-send]")?.addEventListener("click", () => {
+      refreshStarters(payload, { steer: input?.value || starterDraft, fromChat: true });
+    });
   }
 
   function syncToLocation() {
@@ -1870,6 +2250,14 @@
       compareResult = null;
       compareError = null;
       compareUsername = "";
+      comparePickerOpen = true;
+      starterOverride = null;
+      starterSeed = 0;
+      starterSteer = "";
+      starterDraft = "";
+      starterNote = "";
+      starterLoading = false;
+      starterError = null;
       repoSort = "interesting";
       repoLangFilter = "all";
       repoPokeFilter = "all";

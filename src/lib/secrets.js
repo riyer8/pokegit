@@ -1,26 +1,16 @@
 /**
- * Key storage. Never send raw secrets to the UI.
+ * Key storage. Never send raw secrets to the UI. Never hardcode keys in source.
  *
- * Priority: secrets.local.js (gitignored, local-only) → chrome.storage.local
- * Uses local storage (not sync) so keys do not leave this machine via Chrome sync.
+ * Most secure place for a Chrome extension: chrome.storage.local on this device.
+ * Not a .js / .env file in the repo. Those files ship with "Load unpacked"
+ * and leak if you zip, commit, or upload the folder.
+ *
+ * Not chrome.storage.sync, so keys are not uploaded to the Google account.
+ * The service worker is the only code that reads the raw values, and only to
+ * call GitHub / OpenAI. The panel only learns whether a key is present.
  */
 
 const KEYS = ["githubToken", "openaiApiKey"];
-
-let cachedLocal = null;
-
-export async function loadLocalSecrets() {
-  if (cachedLocal) return cachedLocal;
-  try {
-    const mod = await import("./secrets.local.js");
-    const githubToken = sanitizeSecret(mod.GITHUB_TOKEN);
-    const openaiApiKey = sanitizeSecret(mod.OPENAI_API_KEY);
-    cachedLocal = { githubToken, openaiApiKey };
-  } catch {
-    cachedLocal = { githubToken: null, openaiApiKey: null };
-  }
-  return cachedLocal;
-}
 
 function sanitizeSecret(value) {
   if (typeof value !== "string") return null;
@@ -30,7 +20,6 @@ function sanitizeSecret(value) {
 }
 
 async function readStored() {
-  // Prefer device-local storage. Migrate once from sync if needed.
   const local = await chrome.storage.local.get(KEYS);
   if (local.githubToken || local.openaiApiKey) {
     return {
@@ -56,60 +45,47 @@ async function readStored() {
 }
 
 export async function getGithubToken() {
-  const local = await loadLocalSecrets();
-  if (local.githubToken) return local.githubToken;
   const stored = await readStored();
   return stored.githubToken;
 }
 
 export async function getOpenAIKey() {
-  const local = await loadLocalSecrets();
-  if (local.openaiApiKey) return local.openaiApiKey;
   const stored = await readStored();
   return stored.openaiApiKey;
+}
+
+function keyView(present) {
+  return {
+    present,
+    source: present ? "storage" : "none",
+    hint: present ? "saved on this device" : null,
+  };
 }
 
 /**
  * Safe status for the panel. Never includes raw key material.
  */
 export async function getKeyStatus() {
-  const local = await loadLocalSecrets();
   const stored = await readStored();
-
-  const githubSource = local.githubToken ? "local" : stored.githubToken ? "storage" : "none";
-  const openaiSource = local.openaiApiKey ? "local" : stored.openaiApiKey ? "storage" : "none";
-
   return {
-    github: {
-      present: githubSource !== "none",
-      source: githubSource,
-      hint: githubSource === "local" ? "from local .env" : githubSource === "storage" ? "saved on this device" : null,
-    },
-    openai: {
-      present: openaiSource !== "none",
-      source: openaiSource,
-      hint: openaiSource === "local" ? "from local .env" : openaiSource === "storage" ? "saved on this device" : null,
-    },
-    usingLocalEnv: Boolean(local.githubToken || local.openaiApiKey),
+    github: keyView(Boolean(stored.githubToken)),
+    openai: keyView(Boolean(stored.openaiApiKey)),
   };
 }
 
 export async function saveStoredKeys({ githubToken, openaiApiKey }) {
   const patch = {};
-  if (typeof githubToken === "string") {
-    patch.githubToken = sanitizeSecret(githubToken);
-  }
-  if (typeof openaiApiKey === "string") {
-    patch.openaiApiKey = sanitizeSecret(openaiApiKey);
-  }
-  if (Object.keys(patch).length) {
-    await chrome.storage.local.set(patch);
-    // Keep sync clear so keys are not uploaded to the Google account
-    try {
-      await chrome.storage.sync.remove(KEYS);
-    } catch {
-      /* ignore */
-    }
+  const gh = sanitizeSecret(githubToken);
+  const oa = sanitizeSecret(openaiApiKey);
+  if (gh) patch.githubToken = gh;
+  if (oa) patch.openaiApiKey = oa;
+  if (!Object.keys(patch).length) return getKeyStatus();
+
+  await chrome.storage.local.set(patch);
+  try {
+    await chrome.storage.sync.remove(KEYS);
+  } catch {
+    /* ignore */
   }
   return getKeyStatus();
 }

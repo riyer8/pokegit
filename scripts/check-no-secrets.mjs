@@ -14,14 +14,13 @@ const DANGEROUS = [
   /sk-[A-Za-z0-9]{20,}/,
 ];
 
-const mustIgnore = [".env", "src/lib/secrets.local.js"];
+const mustIgnore = [".env"];
 for (const f of mustIgnore) {
   if (!existsSync(f)) continue;
   try {
     const out = execSync(`git check-ignore -v ${f}`, { encoding: "utf8" });
     if (!out.trim()) throw new Error("not ignored");
   } catch {
-    // no git yet is ok; file existence of secrets.local is expected locally
     try {
       execSync("git rev-parse --is-inside-work-tree", { stdio: "ignore" });
       console.error(`FAIL: ${f} exists but is not gitignored`);

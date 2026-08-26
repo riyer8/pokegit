@@ -2,7 +2,10 @@ import { analyzeProfile, GitHubError } from "./lib/analyze.js";
 import { analyzeRepoPage } from "./lib/repo-page.js";
 import { getKeyStatus, saveStoredKeys, clearStoredKeys } from "./lib/secrets.js";
 import { compareProfiles } from "./lib/compare.js";
-import { buildImprovements } from "./lib/improve.js";
+import { buildImprovements, generateSteerStarters } from "./lib/improve.js";
+import { buildCompareSuggestionPool } from "./lib/compare-suggest.js";
+import { fetchContributionPulse } from "./lib/contributions.js";
+import { request } from "./lib/github-request.js";
 import {
   getCachedPayload,
   setCachedPayload,
@@ -65,6 +68,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           },
         })
       );
+    return true;
+  }
+
+  if (message?.type === "POKEGIT_GET_COMPARE_SUGGESTIONS") {
+    handleCompareSuggestions(message.viewerLogin)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((err) => sendResponse({ ok: false, error: safeError(err) }));
+    return true;
+  }
+
+  if (message?.type === "POKEGIT_REFRESH_STARTERS") {
+    handleRefreshStarters(message)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((err) => sendResponse({ ok: false, error: safeError(err) }));
     return true;
   }
 
@@ -214,6 +231,51 @@ async function handleAnalyzeRepo(owner, repo, force = false) {
   return { payload, fromCache: false, cacheTtlMs: PERSIST_TTL_MS };
 }
 
+async function handleCompareSuggestions(viewerLogin) {
+  const login = String(viewerLogin || "").trim();
+  if (!login) return { pool: [] };
+
+  const cacheKey = `following:${login.toLowerCase()}`;
+  const mem = memoryCache.get(cacheKey);
+  if (mem && Date.now() - mem.at < MEMORY_TTL_MS) {
+    return { pool: mem.payload };
+  }
+
+  let following = [];
+  try {
+    const { data } = await request(
+      `/users/${encodeURIComponent(login)}/following?per_page=100`
+    );
+    if (Array.isArray(data)) {
+      following = data.map((u) => ({
+        login: u.login,
+        avatarUrl: u.avatar_url || null,
+        name: u.name || null,
+      }));
+    }
+  } catch {
+    following = [];
+  }
+
+  const pool = buildCompareSuggestionPool({ viewerLogin: login, following });
+  memoryCache.set(cacheKey, { at: Date.now(), payload: pool });
+  return { pool };
+}
+
+async function handleRefreshStarters(message) {
+  const username = String(message?.username || "").trim();
+  if (!username) throw new GitHubError("Missing username", 400);
+  const { payload } = await handleAnalyze(username, false);
+  if (!payload || payload.insufficient) {
+    throw new GitHubError("Not enough public signal to invent starters", 400);
+  }
+  return generateSteerStarters(payload, {
+    steer: message.steer || "",
+    seed: Number(message.seed) || 0,
+    excludeTitles: Array.isArray(message.previousTitles) ? message.previousTitles : [],
+  });
+}
+
 async function handleCompare(leftUsername, rightUsername, force = false) {
   if (!leftUsername || !rightUsername) {
     throw new GitHubError("Need two usernames to compare", 400);
@@ -222,16 +284,20 @@ async function handleCompare(leftUsername, rightUsername, force = false) {
     throw new GitHubError("Pick two different profiles to compare", 400);
   }
 
-  const [leftRes, rightRes] = await Promise.all([
+  const [leftRes, rightRes, leftPulse, rightPulse] = await Promise.all([
     handleAnalyze(leftUsername, force),
     handleAnalyze(rightUsername, force),
+    fetchContributionPulse(leftUsername),
+    fetchContributionPulse(rightUsername),
   ]);
 
-  const comparison = compareProfiles(leftRes.payload, rightRes.payload);
+  const leftPayload = { ...leftRes.payload, contributionPulse: leftPulse };
+  const rightPayload = { ...rightRes.payload, contributionPulse: rightPulse };
+  const comparison = compareProfiles(leftPayload, rightPayload);
   return {
     comparison,
-    left: leftRes.payload,
-    right: rightRes.payload,
+    left: leftPayload,
+    right: rightPayload,
     fromCache: Boolean(leftRes.fromCache && rightRes.fromCache),
   };
 }
