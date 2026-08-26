@@ -10,6 +10,7 @@ import { detectAiAssistance } from "./summarize.js";
 import { openaiChatJson } from "./openai-request.js";
 import { buildRepoDrilldown } from "./insights.js";
 import { preciseBlurb, stripMarkdown } from "./text.js";
+import { buildReadmeCenter, maybePolishReadmeCenter, parsePackageHints } from "./readme-center.js";
 
 function cleanLine(s) {
   return String(s || "")
@@ -426,12 +427,14 @@ export async function analyzeRepoPage(owner, repoName) {
   const findRoot = (name) => rootsOriginal.find((n) => n.toLowerCase() === name.toLowerCase()) || name;
   const commands = [];
   const jobs = [];
+  let packageHints = null;
 
   if (root.includes("package.json")) {
     jobs.push(
-      fetchFileText(owner, repoName, findRoot("package.json")).then((t) =>
-        commands.push(...parseTestCommands(t, "package.json"))
-      )
+      fetchFileText(owner, repoName, findRoot("package.json")).then((t) => {
+        packageHints = parsePackageHints(t);
+        commands.push(...parseTestCommands(t, "package.json"));
+      })
     );
   }
   if (root.includes("pyproject.toml") || root.includes("pytest.ini") || root.includes("setup.cfg")) {
@@ -467,6 +470,15 @@ export async function analyzeRepoPage(owner, repoName) {
 
   let about = buildAbout({ repo, readme, languages });
   about = await maybePolishAbout(about, repo);
+
+  let readmeCenter = buildReadmeCenter({
+    repo,
+    readme,
+    languages,
+    signals,
+    packageHints,
+  });
+  readmeCenter = await maybePolishReadmeCenter(readmeCenter, { repo, readme });
 
   const howToTest = buildHowToTest({
     signals,
@@ -517,6 +529,7 @@ export async function analyzeRepoPage(owner, repoName) {
     drilldown: item.drilldown,
     languages,
     about,
+    readmeCenter,
     howToTest,
     structure,
     aiAssistance,

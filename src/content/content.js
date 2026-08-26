@@ -468,7 +468,7 @@
           <button type="button" class="pokegit-tab is-active" data-tab="profile" data-mode="profile" role="tab">Profile</button>
           <button type="button" class="pokegit-tab" data-tab="repos" data-mode="profile" role="tab">Repos</button>
           <button type="button" class="pokegit-tab" data-tab="compare" data-mode="profile" role="tab">Compare</button>
-          <button type="button" class="pokegit-tab" data-tab="overview" data-mode="repo" role="tab" hidden>Overview</button>
+          <button type="button" class="pokegit-tab" data-tab="overview" data-mode="repo" role="tab" hidden>Center</button>
         </nav>
         <div class="pokegit-body" data-body></div>
       </aside>
@@ -570,7 +570,7 @@
     const showingImprove = !showSettings && activeTab === "improvements";
 
     if (tabs) {
-      tabs.hidden = showSettings || showingImprove;
+      tabs.hidden = showSettings || showingImprove || pageMode === "repo";
       tabs.querySelectorAll("[data-tab]").forEach((t) => {
         const mode = t.getAttribute("data-mode") || "both";
         let visible = !showSettings && !showingImprove;
@@ -759,9 +759,9 @@
       const steps =
         pageMode === "repo"
           ? `<li class="is-on">Fetching repository metadata</li>
-            <li class="is-on">Reading README &amp; root layout</li>
-            <li class="is-pulse">Scoring structure, tests &amp; AI signals</li>
-            <li>Writing the breakdown</li>`
+            <li class="is-on">Reading the README in the Pokémon Center</li>
+            <li class="is-pulse">Diagnosing project DNA &amp; README vitals</li>
+            <li>Writing the lab note</li>`
           : `<li class="is-on">Fetching public profile</li>
             <li class="is-on">Inspecting top repositories</li>
             <li class="is-pulse">Scoring signals &amp; assigning Pokémon</li>
@@ -889,7 +889,7 @@
             <li><strong>Uncertain</strong>: public GitHub alone can’t settle it.</li>
             ${
               isRepo
-                ? `<li><strong>Repo mode</strong>: blends README text with root layout, manifests, languages, and workflow files. Never a private-code audit.</li>`
+                ? `<li><strong>Repo mode</strong>: the README Pokémon Center diagnoses project DNA and README UX from public text. Structure and tests sit underneath. Never a private-code audit.</li>`
                 : ""
             }
           </ul>
@@ -1182,10 +1182,54 @@
       </section>`;
   }
 
+  function renderReadmeCenter(center) {
+    if (!center?.dna) return "";
+    const types = (center.types || [])
+      .map(
+        (d) => `
+        <li class="pg-dna-chip${d.active ? " is-active" : ""}" ${d.active ? 'aria-current="true"' : ""}>
+          <span class="pg-dna-emoji" aria-hidden="true">${escapeHtml(d.emoji)}</span>
+          <span>${escapeHtml(d.label)}</span>
+        </li>`
+      )
+      .join("");
+    const notes = (center.notes || [])
+      .map(
+        (n) => `
+        <li>
+          ${kindBadge(n.kind || "inferred")}
+          <span class="pg-highlight-text">${escapeHtml(n.text)}</span>
+        </li>`
+      )
+      .join("");
+    const quote = center.vitals?.quote || "";
+    return `
+      <section class="pg-block pg-center-lab">
+        <div class="pg-center-kicker">README Pokémon Center</div>
+        <h3 class="pg-section-title">🧬 Project DNA</h3>
+        <ul class="pg-dna-row" aria-label="Project DNA">${types}</ul>
+        <p class="pg-center-why">
+          <strong>${escapeHtml(center.dna.emoji)} ${escapeHtml(center.dna.label)}.</strong>
+          ${escapeHtml(center.dna.why || "")}
+        </p>
+        ${
+          quote
+            ? `<blockquote class="pg-center-quote">“${escapeHtml(quote)}”</blockquote>`
+            : ""
+        }
+        <p class="pg-center-times pg-meta">
+          Understand ~${escapeHtml(String(center.vitals?.understandSeconds ?? "?"))}s
+          · Install ~${escapeHtml(String(center.vitals?.installMinutes ?? "?"))} min
+        </p>
+        ${notes ? `<ul class="pg-center-notes">${notes}</ul>` : ""}
+      </section>`;
+  }
+
   function renderRepoOverview(payload) {
     const repo = payload.repo || {};
     const pokemon = payload.pokemon || {};
     const about = payload.about || {};
+    const center = payload.readmeCenter || {};
     const how = payload.howToTest || {};
     const structure = payload.structure || {};
     const langs = payload.languages || [];
@@ -1231,24 +1275,24 @@
 
     const snaps = [
       {
-        label: "Structure",
-        value: `${structure.score ?? "-"}/10`,
-        tone: scoreTone(structure.score),
+        label: "DNA",
+        value: center.dna?.label || "unknown",
+        tone: "muted",
+      },
+      {
+        label: "Understand",
+        value: center.vitals?.understandSeconds != null ? `${center.vitals.understandSeconds}s` : "?",
+        tone: (center.vitals?.understandSeconds || 99) <= 18 ? "good" : "thin",
+      },
+      {
+        label: "Install",
+        value: center.vitals?.installMinutes != null ? `${center.vitals.installMinutes}m` : "?",
+        tone: (center.vitals?.installMinutes || 99) <= 2 ? "good" : "thin",
       },
       {
         label: "Tests",
         value: how.hasTests ? "visible" : "not clear",
         tone: how.hasTests ? "good" : "thin",
-      },
-      {
-        label: "CI",
-        value: how.hasCi ? "configured" : "not clear",
-        tone: how.hasCi ? "good" : "thin",
-      },
-      {
-        label: "AI signal",
-        value: payload.aiAssistance?.label || payload.aiAssistance?.level || "none",
-        tone: "muted",
       },
     ];
 
@@ -1279,7 +1323,11 @@
             <button type="button" class="pg-btn pg-btn-ghost pg-refresh" data-refresh title="Refresh analysis">↻</button>
           </div>
           <p class="pg-takeaway">${formatRichText(
-            about.blurb || about.summary || repo.description || "Limited public description for this repository."
+            center.vitals?.quote ||
+              about.blurb ||
+              about.summary ||
+              repo.description ||
+              "Limited public description for this repository."
           )}</p>
           ${renderSnapChips(snaps)}
           <div class="pg-meta-bar">
@@ -1292,6 +1340,8 @@
             </span>
           </div>
         </header>
+
+        ${renderReadmeCenter(center)}
 
         ${
           uniqueGoods.length
