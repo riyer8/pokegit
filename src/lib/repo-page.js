@@ -7,7 +7,7 @@ import { inspectRepoSignals } from "./inspect.js";
 import { scoreRepo } from "./score.js";
 import { assignPokemon } from "./pokemon.js";
 import { detectAiAssistance } from "./summarize.js";
-import { getOpenAIKey } from "./secrets.js";
+import { openaiChatJson } from "./openai-request.js";
 import { buildRepoDrilldown } from "./insights.js";
 import { preciseBlurb, stripMarkdown } from "./text.js";
 
@@ -389,37 +389,16 @@ function buildStructure({ repo, signals, scores, languages }) {
 }
 
 async function maybePolishAbout(about, repo) {
-  const key = await getOpenAIKey();
-  if (!key) return about;
   try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        temperature: 0.4,
-        max_tokens: 120,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              'You write PokéGit repo blurbs. Return JSON {"summary":"1-2 precise sentences, under 40 words"}. Plain text only. No markdown. No em dashes. Use only provided facts. Do not invent features.',
-          },
-          {
-            role: "user",
-            content: `Repo: ${repo.fullName}\nLanguage: ${repo.language}\nDescription: ${repo.description || "(none)"}\nTopics: ${(repo.topics || []).join(", ")}\nREADME excerpt: ${about.summary}`,
-          },
-        ],
-      }),
+    const result = await openaiChatJson({
+      temperature: 0.4,
+      maxTokens: 120,
+      system:
+        'You write PokéGit repo blurbs. Return JSON {"summary":"1-2 precise sentences, under 40 words"}. Plain text only. No markdown. No em dashes. Use only provided facts. Do not invent features.',
+      user: `Repo: ${repo.fullName}\nLanguage: ${repo.language}\nDescription: ${repo.description || "(none)"}\nTopics: ${(repo.topics || []).join(", ")}\nREADME excerpt: ${about.summary}`,
     });
-    if (!res.ok) return about;
-    const data = await res.json();
-    const raw = data.choices?.[0]?.message?.content || "";
-    const parsed = JSON.parse(raw);
+    if (!result.ok || !result.content) return about;
+    const parsed = JSON.parse(result.content);
     if (parsed?.summary) {
       about.summary = preciseBlurb(cleanLine(parsed.summary), { maxChars: 220, maxSentences: 2 });
       about.blurb = preciseBlurb(about.summary, { maxChars: 160, maxSentences: 2 });

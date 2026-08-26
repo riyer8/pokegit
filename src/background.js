@@ -5,7 +5,8 @@ import { compareProfiles } from "./lib/compare.js";
 import { buildImprovements, generateSteerStarters } from "./lib/improve.js";
 import { buildCompareSuggestionPool } from "./lib/compare-suggest.js";
 import { fetchContributionPulse } from "./lib/contributions.js";
-import { request } from "./lib/github-request.js";
+import { request, isSafeGithubLogin, isSafeGithubRepoName } from "./lib/github-request.js";
+import { redactSecrets } from "./lib/secret-safety.js";
 import {
   getCachedPayload,
   setCachedPayload,
@@ -18,92 +19,111 @@ import {
 const memoryCache = new Map();
 const MEMORY_TTL_MS = 15 * 60 * 1000;
 
+const ALLOWED_TYPES = new Set([
+  "POKEGIT_ANALYZE_PROFILE",
+  "POKEGIT_FETCH_PROFILE",
+  "POKEGIT_ANALYZE_REPO",
+  "POKEGIT_COMPARE_PROFILES",
+  "POKEGIT_GET_COMPARE_SUGGESTIONS",
+  "POKEGIT_REFRESH_STARTERS",
+  "POKEGIT_GET_HISTORY",
+  "POKEGIT_GET_KEY_STATUS",
+  "POKEGIT_SAVE_KEYS",
+  "POKEGIT_CLEAR_KEYS",
+  "POKEGIT_CLEAR_CACHE",
+]);
+
+const KEY_WRITE_TYPES = new Set(["POKEGIT_SAVE_KEYS", "POKEGIT_CLEAR_KEYS"]);
+
+function isOwnExtension(sender) {
+  return Boolean(sender?.id && sender.id === chrome.runtime.id);
+}
+
+function isGithubContentScript(sender) {
+  if (!isOwnExtension(sender)) return false;
+  const url = String(sender.url || "");
+  const origin = String(sender.origin || "");
+  return url.startsWith("https://github.com/") || origin === "https://github.com";
+}
+
+function safeError(err) {
+  return redactSecrets(err?.message || "Something went wrong");
+}
+
+function publicError(err) {
+  return {
+    message: safeError(err),
+    status: err?.status || 0,
+    rateLimitRemaining: err?.rateLimitRemaining ?? null,
+  };
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (sender.id && sender.id !== chrome.runtime.id) {
+  if (!isOwnExtension(sender) || !ALLOWED_TYPES.has(message?.type)) {
     sendResponse({ ok: false, error: "Unauthorized" });
     return false;
   }
 
-  if (message?.type === "POKEGIT_ANALYZE_PROFILE" || message?.type === "POKEGIT_FETCH_PROFILE") {
+  if (KEY_WRITE_TYPES.has(message.type) && !isGithubContentScript(sender)) {
+    sendResponse({ ok: false, error: "Unauthorized" });
+    return false;
+  }
+
+  if (message.type === "POKEGIT_ANALYZE_PROFILE" || message.type === "POKEGIT_FETCH_PROFILE") {
     handleAnalyze(message.username, Boolean(message.force))
       .then((result) => sendResponse({ ok: true, ...result }))
-      .catch((err) =>
-        sendResponse({
-          ok: false,
-          error: {
-            message: err.message || "Failed to analyze profile",
-            status: err.status || 0,
-            rateLimitRemaining: err.rateLimitRemaining ?? null,
-          },
-        })
-      );
+      .catch((err) => sendResponse({ ok: false, error: publicError(err) }));
     return true;
   }
 
-  if (message?.type === "POKEGIT_ANALYZE_REPO") {
+  if (message.type === "POKEGIT_ANALYZE_REPO") {
     handleAnalyzeRepo(message.owner, message.repo, Boolean(message.force))
       .then((result) => sendResponse({ ok: true, ...result }))
-      .catch((err) =>
-        sendResponse({
-          ok: false,
-          error: {
-            message: err.message || "Failed to analyze repository",
-            status: err.status || 0,
-            rateLimitRemaining: err.rateLimitRemaining ?? null,
-          },
-        })
-      );
+      .catch((err) => sendResponse({ ok: false, error: publicError(err) }));
     return true;
   }
 
-  if (message?.type === "POKEGIT_COMPARE_PROFILES") {
+  if (message.type === "POKEGIT_COMPARE_PROFILES") {
     handleCompare(message.leftUsername, message.rightUsername, Boolean(message.force))
       .then((result) => sendResponse({ ok: true, ...result }))
-      .catch((err) =>
-        sendResponse({
-          ok: false,
-          error: {
-            message: err.message || "Compare failed",
-            status: err.status || 0,
-          },
-        })
-      );
+      .catch((err) => sendResponse({ ok: false, error: publicError(err) }));
     return true;
   }
 
-  if (message?.type === "POKEGIT_GET_COMPARE_SUGGESTIONS") {
+  if (message.type === "POKEGIT_GET_COMPARE_SUGGESTIONS") {
     handleCompareSuggestions(message.viewerLogin)
       .then((result) => sendResponse({ ok: true, ...result }))
       .catch((err) => sendResponse({ ok: false, error: safeError(err) }));
     return true;
   }
 
-  if (message?.type === "POKEGIT_REFRESH_STARTERS") {
+  if (message.type === "POKEGIT_REFRESH_STARTERS") {
     handleRefreshStarters(message)
       .then((result) => sendResponse({ ok: true, ...result }))
       .catch((err) => sendResponse({ ok: false, error: safeError(err) }));
     return true;
   }
 
-  if (message?.type === "POKEGIT_GET_HISTORY") {
+  if (message.type === "POKEGIT_GET_HISTORY") {
     loadHistory()
       .then((history) => sendResponse({ ok: true, history }))
       .catch((err) => sendResponse({ ok: false, error: safeError(err) }));
     return true;
   }
 
-  if (message?.type === "POKEGIT_GET_KEY_STATUS") {
+  if (message.type === "POKEGIT_GET_KEY_STATUS") {
     getKeyStatus()
       .then((status) => sendResponse({ ok: true, status }))
       .catch((err) => sendResponse({ ok: false, error: safeError(err) }));
     return true;
   }
 
-  if (message?.type === "POKEGIT_SAVE_KEYS") {
-    saveStoredKeys({
-      githubToken: message.githubToken,
-      openaiApiKey: message.openaiApiKey,
-    })
+  if (message.type === "POKEGIT_SAVE_KEYS") {
+    const githubToken = message.githubToken;
+    const openaiApiKey = message.openaiApiKey;
+    message.githubToken = undefined;
+    message.openaiApiKey = undefined;
+    saveStoredKeys({ githubToken, openaiApiKey })
       .then(async (status) => {
         memoryCache.clear();
         await clearPayloadCache();
@@ -113,7 +133,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === "POKEGIT_CLEAR_KEYS") {
+  if (message.type === "POKEGIT_CLEAR_KEYS") {
     clearStoredKeys()
       .then(async (status) => {
         memoryCache.clear();
@@ -124,18 +144,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === "POKEGIT_CLEAR_CACHE") {
+  if (message.type === "POKEGIT_CLEAR_CACHE") {
     memoryCache.clear();
     clearPayloadCache()
       .then(() => sendResponse({ ok: true }))
       .catch((err) => sendResponse({ ok: false, error: safeError(err) }));
     return true;
   }
-});
 
-function safeError(err) {
-  return err?.message || "Something went wrong";
-}
+  sendResponse({ ok: false, error: "Unauthorized" });
+  return false;
+});
 
 function withImprovements(payload) {
   if (!payload || payload.insufficient) return payload;
@@ -150,7 +169,7 @@ function withImprovements(payload) {
 }
 
 async function handleAnalyze(username, force = false) {
-  if (!username || typeof username !== "string") {
+  if (!isSafeGithubLogin(username)) {
     throw new GitHubError("Missing username", 400);
   }
 
@@ -197,7 +216,7 @@ async function handleAnalyze(username, force = false) {
 }
 
 async function handleAnalyzeRepo(owner, repo, force = false) {
-  if (!owner || !repo || typeof owner !== "string" || typeof repo !== "string") {
+  if (!isSafeGithubLogin(owner) || !isSafeGithubRepoName(repo)) {
     throw new GitHubError("Missing owner/repo", 400);
   }
   const key = `repo:${owner}/${repo}`.toLowerCase();
@@ -233,7 +252,7 @@ async function handleAnalyzeRepo(owner, repo, force = false) {
 
 async function handleCompareSuggestions(viewerLogin) {
   const login = String(viewerLogin || "").trim();
-  if (!login) return { pool: [] };
+  if (!isSafeGithubLogin(login)) return { pool: [] };
 
   const cacheKey = `following:${login.toLowerCase()}`;
   const mem = memoryCache.get(cacheKey);
@@ -264,7 +283,7 @@ async function handleCompareSuggestions(viewerLogin) {
 
 async function handleRefreshStarters(message) {
   const username = String(message?.username || "").trim();
-  if (!username) throw new GitHubError("Missing username", 400);
+  if (!isSafeGithubLogin(username)) throw new GitHubError("Missing username", 400);
   const { payload } = await handleAnalyze(username, false);
   if (!payload || payload.insufficient) {
     throw new GitHubError("Not enough public signal to invent starters", 400);
@@ -277,7 +296,7 @@ async function handleRefreshStarters(message) {
 }
 
 async function handleCompare(leftUsername, rightUsername, force = false) {
-  if (!leftUsername || !rightUsername) {
+  if (!isSafeGithubLogin(leftUsername) || !isSafeGithubLogin(rightUsername)) {
     throw new GitHubError("Need two usernames to compare", 400);
   }
   if (leftUsername.toLowerCase() === rightUsername.toLowerCase()) {

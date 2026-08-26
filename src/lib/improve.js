@@ -3,6 +3,8 @@
  * Never invents private-repo advice. Soft, practical, evidence-backed.
  */
 
+import { openaiChatJson } from "./openai-request.js";
+
 function daysSince(iso) {
   if (!iso) return 9999;
   return (Date.now() - new Date(iso).getTime()) / (1000 * 60 * 60 * 24);
@@ -430,15 +432,6 @@ export async function generateSteerStarters(payload, { steer = "", seed = 0, exc
   const heuristic = refreshStartersHeuristic(payload, { seed, excludeTitles, steer });
   const direction = cleanStarterText(steer).slice(0, 280);
 
-  let openaiApiKey = null;
-  try {
-    const { getOpenAIKey } = await import("./secrets.js");
-    openaiApiKey = await getOpenAIKey();
-  } catch {
-    openaiApiKey = null;
-  }
-  if (!openaiApiKey) return heuristic;
-
   const avoid = (excludeTitles || []).slice(0, 8).join(", ");
   const system = `You invent 5 small public GitHub starter repos for THIS person.
 They must bounce off skills already visible (named repos, languages, topics).
@@ -457,34 +450,21 @@ Return ONLY JSON:
 Exactly 5 starters.`;
 
   try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${openaiApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        temperature: 0.9,
-        max_tokens: 900,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: system },
-          {
-            role: "user",
-            content: [
-              profileSketch(payload),
-              direction ? `\nDirection they asked for:\n${direction}` : "\nNo extra direction. Surprise them with a fresh but grounded batch.",
-              avoid ? `\nAvoid repeating these titles: ${avoid}` : "",
-            ].join(""),
-          },
-        ],
-      }),
+    const result = await openaiChatJson({
+      system,
+      temperature: 0.9,
+      maxTokens: 900,
+      user: [
+        profileSketch(payload),
+        direction
+          ? `\nDirection they asked for:\n${direction}`
+          : "\nNo extra direction. Surprise them with a fresh but grounded batch.",
+        avoid ? `\nAvoid repeating these titles: ${avoid}` : "",
+      ].join(""),
     });
-    if (!res.ok) return heuristic;
-    const data = await res.json();
+    if (!result.ok) return heuristic;
     let parsed = null;
-    const raw = data.choices?.[0]?.message?.content || "";
+    const raw = result.content || "";
     try {
       parsed = JSON.parse(raw);
     } catch {

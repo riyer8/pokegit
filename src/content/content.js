@@ -925,6 +925,8 @@
         return;
       }
       const res = await extSend({ type: "POKEGIT_SAVE_KEYS", ...payload });
+      payload.githubToken = undefined;
+      payload.openaiApiKey = undefined;
       if (!res?.ok) {
         if (msg) {
           msg.style.color = "#a12a0a";

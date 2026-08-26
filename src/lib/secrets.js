@@ -1,14 +1,12 @@
 /**
  * Key storage. Never send raw secrets to the UI. Never hardcode keys in source.
  *
- * Most secure place for a Chrome extension: chrome.storage.local on this device.
- * Not a .js / .env file in the repo. Those files ship with "Load unpacked"
- * and leak if you zip, commit, or upload the folder.
- *
- * Not chrome.storage.sync, so keys are not uploaded to the Google account.
- * The service worker is the only code that reads the raw values, and only to
- * call GitHub / OpenAI. The panel only learns whether a key is present.
+ * Keys live only in chrome.storage.local on this device (not sync).
+ * The service worker is the only code that reads raw values, and only to
+ * call GitHub / OpenAI through github-request / openai-request.
  */
+
+import { isPlausibleGithubToken, isPlausibleOpenAIKey } from "./secret-safety.js";
 
 const KEYS = ["githubToken", "openaiApiKey"];
 
@@ -17,6 +15,16 @@ function sanitizeSecret(value) {
   const v = value.trim();
   if (!v || v === "undefined" || v === "null") return null;
   return v;
+}
+
+function acceptedGithubToken(value) {
+  const v = sanitizeSecret(value);
+  return v && isPlausibleGithubToken(v) ? v : null;
+}
+
+function acceptedOpenAIKey(value) {
+  const v = sanitizeSecret(value);
+  return v && isPlausibleOpenAIKey(v) ? v : null;
 }
 
 async function readStored() {
@@ -62,9 +70,6 @@ function keyView(present) {
   };
 }
 
-/**
- * Safe status for the panel. Never includes raw key material.
- */
 export async function getKeyStatus() {
   const stored = await readStored();
   return {
@@ -75,10 +80,24 @@ export async function getKeyStatus() {
 
 export async function saveStoredKeys({ githubToken, openaiApiKey }) {
   const patch = {};
-  const gh = sanitizeSecret(githubToken);
-  const oa = sanitizeSecret(openaiApiKey);
-  if (gh) patch.githubToken = gh;
-  if (oa) patch.openaiApiKey = oa;
+  if (typeof githubToken === "string" && githubToken.trim()) {
+    const gh = acceptedGithubToken(githubToken);
+    if (!gh) {
+      const err = new Error("That GitHub token doesn't look valid.");
+      err.status = 400;
+      throw err;
+    }
+    patch.githubToken = gh;
+  }
+  if (typeof openaiApiKey === "string" && openaiApiKey.trim()) {
+    const oa = acceptedOpenAIKey(openaiApiKey);
+    if (!oa) {
+      const err = new Error("That OpenAI key doesn't look valid.");
+      err.status = 400;
+      throw err;
+    }
+    patch.openaiApiKey = oa;
+  }
   if (!Object.keys(patch).length) return getKeyStatus();
 
   await chrome.storage.local.set(patch);

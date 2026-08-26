@@ -3,7 +3,7 @@
  * Distinguishes observed / inferred / uncertain. Never invents AI %.
  */
 
-import { getOpenAIKey } from "./secrets.js";
+import { openaiChatJson } from "./openai-request.js";
 import { SCORE_DISCLAIMER } from "./score.js";
 import { activityAdjective, activityVibe } from "./activity.js";
 
@@ -432,11 +432,6 @@ export async function generateSummary(analysis) {
   const fallback = heuristicSummary(analysis);
   if (analysis.insufficient) return fallback;
 
-  const openaiApiKey = await getOpenAIKey();
-  if (!openaiApiKey) {
-    return { ...fallback, source: "heuristic" };
-  }
-
   const context = buildContext(analysis);
   const system = `You write PokéGit profile insights from structured GitHub facts.
 Product name is always PokéGit. Never invent other product names.
@@ -476,31 +471,19 @@ Epistemic rules (critical):
 - Only claim what the data supports.`;
 
   try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${openaiApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        temperature: 0.55,
-        max_tokens: 700,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: `Analyze this PokéGit profile.\n\n${context}` },
-        ],
-      }),
+    const result = await openaiChatJson({
+      system,
+      user: `Analyze this PokéGit profile.\n\n${context}`,
+      temperature: 0.55,
+      maxTokens: 700,
     });
-
-    if (!res.ok) {
-      console.warn("PokéGit OpenAI error", res.status);
+    if (result.missingKey) return { ...fallback, source: "heuristic" };
+    if (!result.ok) {
+      console.warn("PokéGit OpenAI error", result.status || "request failed");
       return { ...fallback, unavailable: true, source: "heuristic" };
     }
 
-    const data = await res.json();
-    const parsed = parseModelJson(data.choices?.[0]?.message?.content);
+    const parsed = parseModelJson(result.content);
     if (!parsed) return { ...fallback, unavailable: true, source: "heuristic" };
 
     if (
@@ -529,8 +512,8 @@ Epistemic rules (critical):
       packed.reds = fallback.reds;
     }
     return packed;
-  } catch (err) {
-    console.warn("PokéGit OpenAI failed", err?.message || "error");
+  } catch {
+    console.warn("PokéGit OpenAI failed");
     return { ...fallback, unavailable: true, source: "heuristic" };
   }
 }
