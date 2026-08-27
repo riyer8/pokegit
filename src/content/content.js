@@ -36,6 +36,43 @@
   const DISCLAIMER =
     "Experimental score based on publicly observable repository signals. Not an objective assessment of engineering ability.";
 
+  const POKEBALL_SVG = pokeballSvg(44);
+
+  function pokeballSvg(size) {
+    const n = Number(size) || 44;
+    return `
+    <svg class="pokegit-ball" width="${n}" height="${n}" viewBox="0 0 128 128" fill="none" aria-hidden="true" style="width:${n}px;height:${n}px;display:block;flex-shrink:0">
+      <defs>
+        <linearGradient id="pgBallRed" x1="64" y1="10" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#FF704E"/>
+          <stop offset=".62" stop-color="#E3350D"/>
+          <stop offset="1" stop-color="#B0180C"/>
+        </linearGradient>
+        <linearGradient id="pgBallWhite" x1="64" y1="64" x2="64" y2="118" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#FFFFFF"/>
+          <stop offset="1" stop-color="#E8E2D8"/>
+        </linearGradient>
+        <radialGradient id="pgBallGloss" cx="44" cy="38" r="42" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#FFFFFF" stop-opacity=".55"/>
+          <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+        </radialGradient>
+        <clipPath id="pgBallClip">
+          <circle cx="64" cy="64" r="54"/>
+        </clipPath>
+      </defs>
+      <circle cx="64" cy="64" r="54" fill="url(#pgBallWhite)"/>
+      <g clip-path="url(#pgBallClip)">
+        <path d="M10 64a54 54 0 0 1 108 0H10Z" fill="url(#pgBallRed)"/>
+        <rect x="10" y="58.5" width="108" height="11" fill="#16202C"/>
+        <circle cx="44" cy="38" r="42" fill="url(#pgBallGloss)"/>
+      </g>
+      <circle cx="64" cy="64" r="54" stroke="#16202C" stroke-width="5.5"/>
+      <circle cx="64" cy="64" r="15" fill="#16202C"/>
+      <circle cx="64" cy="64" r="9.5" fill="#F7F4EF"/>
+      <circle cx="64" cy="64" r="4.2" fill="#16202C"/>
+    </svg>`;
+  }
+
   const SPARKLES_ICON = `
     <svg class="pokegit-sparkle-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M12 3l1.62 4.45L18 9.07l-4.38 1.62L12 15.14l-1.62-4.45L6 9.07l4.38-1.62L12 3z"/>
@@ -78,6 +115,10 @@
   let repoLangFilter = "all";
   let repoPokeFilter = "all";
   let loggedInUser = null;
+  let repoChat = [];
+  let repoChatDraft = "";
+  let repoChatLoading = false;
+  let repoChatError = null;
 
   const NON_REPO_SECONDS = new Set([
     "followers", "following", "stars", "packages", "projects", "sponsors",
@@ -85,7 +126,7 @@
     "security", "settings", "wiki",
   ]);
 
-  const state = { fab: null, host: null, shadow: null };
+  const state = { fab: null, host: null, shadow: null, panelReady: null };
   let contextDead = false;
 
   /** False after the extension is reloaded/disabled while this tab stays open. */
@@ -114,10 +155,12 @@
         state.host.remove();
         state.host = null;
         state.shadow = null;
+        state.panelReady = null;
       }
     } catch {
       state.host = null;
       state.shadow = null;
+      state.panelReady = null;
     }
   }
 
@@ -264,6 +307,118 @@
     return s;
   }
 
+  function formatChatMarkdown(raw) {
+    const text = String(raw || "");
+    if (!text.trim()) return "";
+
+    const formatInline = (chunk) => formatRichText(chunk);
+    const listItem = (line) => {
+      const m = String(line || "").match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+      if (!m) return null;
+      return { indent: m[1].length, ordered: /^\d/.test(m[2]), text: m[3] };
+    };
+
+    const consumeList = (from, baseIndent, ordered) => {
+      const items = [];
+      let i = from;
+      while (i < lines.length) {
+        const item = listItem(lines[i]);
+        if (item) {
+          if (item.indent < baseIndent) break;
+          if (item.indent > baseIndent && items.length) {
+            const nested = consumeList(i, item.indent, item.ordered);
+            items[items.length - 1] += nested.html;
+            i = nested.i;
+            continue;
+          }
+          if (item.indent === baseIndent && item.ordered !== ordered && items.length) break;
+          items.push(formatInline(item.text));
+          i += 1;
+          continue;
+        }
+        if (
+          items.length &&
+          /^\s{2,}\S/.test(lines[i]) &&
+          !lines[i].trim().startsWith("```") &&
+          !/^\s*#{1,6}\s+/.test(lines[i])
+        ) {
+          items[items.length - 1] += ` ${formatInline(lines[i].trim())}`;
+          i += 1;
+          continue;
+        }
+        break;
+      }
+      const tag = ordered ? "ol" : "ul";
+      return {
+        i,
+        html: `<${tag}>${items.map((item) => `<li>${item}</li>`).join("")}</${tag}>`,
+      };
+    };
+
+    let html = "";
+    const lines = text.split(/\n/);
+    let i = 0;
+    let para = [];
+
+    const flushPara = () => {
+      if (!para.length) return;
+      html += `<p>${formatInline(para.join(" "))}</p>`;
+      para = [];
+    };
+
+    while (i < lines.length) {
+      const line = lines[i];
+      if (line.trim().startsWith("```")) {
+        flushPara();
+        i += 1;
+        const code = [];
+        while (i < lines.length && !lines[i].trim().startsWith("```")) {
+          code.push(lines[i]);
+          i += 1;
+        }
+        if (i < lines.length) i += 1;
+        html += `<pre class="pg-chat-pre"><code>${escapeHtml(code.join("\n"))}</code></pre>`;
+        continue;
+      }
+      const item = listItem(line);
+      if (item) {
+        flushPara();
+        const nested = consumeList(i, item.indent, item.ordered);
+        html += nested.html;
+        i = nested.i;
+        continue;
+      }
+      if (/^\s*#{1,6}\s+/.test(line)) {
+        flushPara();
+        html += `<p class="pg-chat-h">${formatInline(line.replace(/^\s*#{1,6}\s+/, ""))}</p>`;
+        i += 1;
+        continue;
+      }
+      if (!line.trim()) {
+        flushPara();
+        i += 1;
+        continue;
+      }
+      para.push(line.trim());
+      i += 1;
+    }
+    flushPara();
+    return html || `<p>${formatInline(text)}</p>`;
+  }
+
+  function withChatCaret(html) {
+    const caret = `<span class="pg-chat-caret" aria-hidden="true"></span>`;
+    if (!html) return caret;
+    const marks = ["</li>", "</p>", "</code>"];
+    let at = -1;
+    for (const mark of marks) {
+      const idx = html.lastIndexOf(mark);
+      if (idx > at) at = idx;
+    }
+    if (at < 0) return html + caret;
+    return html.slice(0, at) + caret + html.slice(at);
+  }
+
   /** Escape text, then wrap Pokémon codewords with colored hover tips. */
   function linkPokemonTerms(text) {
     return formatRichText(text, { poke: true });
@@ -397,7 +552,7 @@
     fab.type = "button";
     fab.hidden = true;
     fab.setAttribute("aria-label", "Open PokéGit");
-    fab.innerHTML = `<span class="pokegit-fab-mark" aria-hidden="true"></span>`;
+    fab.innerHTML = `<span class="pokegit-fab-mark" aria-hidden="true">${pokeballSvg(30)}</span>`;
     fab.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -443,6 +598,12 @@
     style.href = cssUrl;
     shadow.appendChild(style);
 
+    const boot = document.createElement("style");
+    boot.textContent =
+      ".pokegit-ball{width:44px;height:44px;max-width:44px;max-height:44px;display:block;flex-shrink:0}" +
+      ".pg-pokeball-load{width:44px;height:44px;overflow:hidden;display:grid;place-items:center}";
+    shadow.appendChild(boot);
+
     const fonts = document.createElement("link");
     fonts.rel = "stylesheet";
     fonts.href = fontsUrl;
@@ -468,7 +629,8 @@
           <button type="button" class="pokegit-tab is-active" data-tab="profile" data-mode="profile" role="tab">Profile</button>
           <button type="button" class="pokegit-tab" data-tab="repos" data-mode="profile" role="tab">Repos</button>
           <button type="button" class="pokegit-tab" data-tab="compare" data-mode="profile" role="tab">Compare</button>
-          <button type="button" class="pokegit-tab" data-tab="overview" data-mode="repo" role="tab" hidden>Center</button>
+          <button type="button" class="pokegit-tab" data-tab="overview" data-mode="repo" role="tab" hidden>Summary</button>
+          <button type="button" class="pokegit-tab" data-tab="chat" data-mode="repo" role="tab" hidden>Chat</button>
         </nav>
         <div class="pokegit-body" data-body></div>
       </aside>
@@ -542,6 +704,29 @@
     document.documentElement.appendChild(host);
     state.host = host;
     state.shadow = shadow;
+    state.panelReady = waitForStylesheet(style);
+  }
+
+  function waitForStylesheet(link) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      try {
+        if (link.sheet) {
+          done();
+          return;
+        }
+      } catch {
+        /* ignore */
+      }
+      link.addEventListener("load", done, { once: true });
+      link.addEventListener("error", done, { once: true });
+      window.setTimeout(done, 280);
+    });
   }
 
   function canShowImprovements() {
@@ -570,7 +755,7 @@
     const showingImprove = !showSettings && activeTab === "improvements";
 
     if (tabs) {
-      tabs.hidden = showSettings || showingImprove || pageMode === "repo";
+      tabs.hidden = showSettings || showingImprove;
       tabs.querySelectorAll("[data-tab]").forEach((t) => {
         const mode = t.getAttribute("data-mode") || "both";
         let visible = !showSettings && !showingImprove;
@@ -588,7 +773,7 @@
     state.shadow?.querySelector("[data-settings]")?.classList.toggle("is-active", showSettings);
   }
 
-  function openPanel(forceRefresh = false) {
+  async function openPanel(forceRefresh = false) {
     if (!canAnalyze() || contextDead) return;
     if (!extensionAlive()) {
       markContextDead();
@@ -596,6 +781,8 @@
     }
     ensurePanel();
     if (!state.host) return;
+    if (state.panelReady) await state.panelReady;
+    if (!state.host || contextDead) return;
     panelOpen = true;
     showSettings = false;
     activeTab = defaultTabForMode();
@@ -745,6 +932,7 @@
     if (!body) return;
     applyTheme();
     updateTabsVisibility();
+    body.classList.toggle("is-repo-chat", (pageMode === "repo" || lastPayload?.mode === "repo") && activeTab === "chat");
 
     if (showSettings) {
       renderSettingsView(body);
@@ -768,7 +956,7 @@
             <li>Writing observations</li>`;
       body.innerHTML = `
         <div class="pg-state pg-loading-state">
-          <div class="pg-pokeball-load" aria-hidden="true"></div>
+          <div class="pg-pokeball-load" aria-hidden="true">${POKEBALL_SVG}</div>
           <h3>Analyzing ${subject}</h3>
           <ul class="pg-load-steps">${steps}</ul>
         </div>`;
@@ -815,8 +1003,15 @@
     }
 
     if (pageMode === "repo" || lastPayload.mode === "repo") {
-      body.innerHTML = renderRepoOverview(lastPayload);
-      body.querySelector("[data-refresh]")?.addEventListener("click", () => analyze(true));
+      if (activeTab === "chat") {
+        body.innerHTML = renderRepoChat(lastPayload);
+        wireRepoChat(body, lastPayload);
+      } else {
+        body.innerHTML = renderRepoOverview(lastPayload);
+        body.querySelector("[data-refresh]")?.addEventListener("click", () => analyze(true));
+        activeTab = "overview";
+        updateTabsVisibility();
+      }
       wireFloatingTips(body);
       return;
     }
@@ -1182,6 +1377,189 @@
       </section>`;
   }
 
+  function renderRepoChat(payload) {
+    const repo = payload.repo || {};
+    const brief = payload.chatBrief || {};
+    const name = repo.name || currentRepo || "this repo";
+    const fileNote =
+      brief.fileCount > 0
+        ? `Packed ${brief.fileCount} public file${brief.fileCount === 1 ? "" : "s"}${
+            brief.truncated ? " (tree truncated)" : ""
+          }${
+            brief.excerptPaths?.length
+              ? `, including ${brief.excerptPaths.slice(0, 4).join(", ")}`
+              : ""
+          }.`
+        : "Packed the README and public metadata. File tree was thin or unavailable.";
+
+    const thread =
+      repoChat.length || repoChatLoading
+        ? repoChat
+            .map((m) => {
+              const bot = m.role !== "user";
+              const streaming = Boolean(m.streaming);
+              return `
+          <div class="pg-chat-bubble is-${bot ? "bot" : "user"}${streaming ? " is-streaming" : ""}"${
+                streaming ? " data-chat-stream" : ""
+              }>
+            ${
+              bot
+                ? streaming
+                  ? withChatCaret(formatChatMarkdown(m.content))
+                  : formatChatMarkdown(m.content)
+                : escapeHtml(m.content)
+            }
+          </div>`;
+            })
+            .join("")
+        : `<div class="pg-chat-empty">
+            <p>Ask ${escapeHtml(name)} what it does, how a file fits, or how to run it.</p>
+            <p class="pg-meta">${escapeHtml(fileNote)} Public files only. It cannot see private code.</p>
+          </div>`;
+
+    return `
+      <div class="pg-repo-chat">
+        <header class="pg-chat-head">
+          <h3 class="pg-section-title">Talk to ${escapeHtml(name)}</h3>
+          <p class="pg-section-lede">A chat with the public repo: README, file tree, and key file excerpts.</p>
+        </header>
+        <div class="pg-chat-thread" data-chat-thread>${thread}</div>
+        ${repoChatError ? `<p class="pg-steer-error">${escapeHtml(repoChatError)}</p>` : ""}
+        <form class="pg-chat-form" data-chat-form>
+          <textarea class="pg-input" data-chat-input rows="2" maxlength="2000"
+            placeholder="What are you doing in src/index.ts?" ${repoChatLoading ? "disabled" : ""}>${escapeHtml(
+              repoChatDraft
+            )}</textarea>
+          <button type="submit" class="pg-btn pg-btn-primary" data-chat-send ${
+            repoChatLoading ? "disabled" : ""
+          }>Ask</button>
+        </form>
+      </div>`;
+  }
+
+  function wireRepoChat(body, payload) {
+    const form = body.querySelector("[data-chat-form]");
+    const input = body.querySelector("[data-chat-input]");
+    const thread = body.querySelector("[data-chat-thread]");
+    if (thread) thread.scrollTop = thread.scrollHeight;
+    input?.addEventListener("input", () => {
+      repoChatDraft = input.value;
+    });
+    ["keydown", "keyup", "keypress"].forEach((type) => {
+      input?.addEventListener(type, (e) => e.stopPropagation());
+    });
+    input?.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || e.isComposing) return;
+      if (e.metaKey || e.ctrlKey) {
+        e.preventDefault();
+        const start = input.selectionStart ?? input.value.length;
+        const end = input.selectionEnd ?? start;
+        const next = `${input.value.slice(0, start)}\n${input.value.slice(end)}`;
+        input.value = next;
+        input.selectionStart = input.selectionEnd = start + 1;
+        repoChatDraft = next;
+        return;
+      }
+      e.preventDefault();
+      form?.requestSubmit();
+    });
+    form?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const question = (input?.value || repoChatDraft || "").trim();
+      if (!question || repoChatLoading) return;
+      repoChatDraft = "";
+      repoChatError = null;
+      repoChat.push({ role: "user", content: question });
+      repoChat.push({ role: "assistant", content: "", streaming: true });
+      repoChatLoading = true;
+      renderBody();
+      const paint = (text) => {
+        const last = repoChat[repoChat.length - 1];
+        if (last?.role === "assistant") last.content = text;
+        const el = state.shadow?.querySelector("[data-chat-stream]");
+        if (el) el.innerHTML = withChatCaret(formatChatMarkdown(text));
+        const scroller = state.shadow?.querySelector("[data-chat-thread]");
+        if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      };
+      try {
+        const history = repoChat
+          .slice(0, -2)
+          .map((m) => ({ role: m.role, content: m.content }))
+          .slice(-10);
+        const res = await streamRepoChat({
+          owner: payload.repo?.owner?.login || currentOwner,
+          repo: payload.repo?.name || currentRepo,
+          question,
+          history,
+          onDelta: paint,
+        });
+        if (!res?.ok) {
+          repoChat.pop();
+          repoChat.pop();
+          repoChatDraft = question;
+          const err = typeof res?.error === "string" ? res.error : res?.error?.message;
+          repoChatError = err || "Couldn't reach the repo.";
+          if (/openai key/i.test(repoChatError)) {
+            repoChatError = "Add an OpenAI key in Settings to talk to this repo.";
+          }
+        } else {
+          const last = repoChat[repoChat.length - 1];
+          if (last?.role === "assistant") {
+            last.content = res.reply || last.content;
+            last.streaming = false;
+          }
+        }
+      } catch (err) {
+        repoChat.pop();
+        repoChat.pop();
+        repoChatDraft = question;
+        repoChatError = err?.message || "Couldn't reach the repo.";
+      } finally {
+        repoChatLoading = false;
+        const last = repoChat[repoChat.length - 1];
+        if (last?.streaming) last.streaming = false;
+        renderBody();
+        const next = state.shadow?.querySelector("[data-chat-input]");
+        next?.focus();
+      }
+    });
+  }
+
+  function streamRepoChat({ owner, repo, question, history, onDelta }) {
+    return new Promise((resolve) => {
+      let port;
+      try {
+        port = chrome.runtime.connect({ name: "pokegit-repo-chat" });
+      } catch {
+        resolve({ ok: false, error: "Couldn't reach the repo." });
+        return;
+      }
+      let settled = false;
+      let timer = 0;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        try {
+          port.disconnect();
+        } catch {
+          /* ignore */
+        }
+        resolve(result);
+      };
+      timer = window.setTimeout(() => finish({ ok: false, error: "Chat timed out." }), 90000);
+      port.onMessage.addListener((msg) => {
+        if (msg?.type === "delta" && typeof msg.full === "string") onDelta(msg.full);
+        else if (msg?.type === "done") finish({ ok: true, reply: msg.reply || "" });
+        else if (msg?.type === "error") finish({ ok: false, error: msg.error || "Couldn't reach the repo." });
+      });
+      port.onDisconnect.addListener(() => {
+        if (!settled) finish({ ok: false, error: "Couldn't reach the repo." });
+      });
+      port.postMessage({ owner, repo, question, history });
+    });
+  }
+
   function renderReadmeCenter(center) {
     if (!center?.dna) return "";
     const types = (center.types || [])
@@ -1202,7 +1580,6 @@
         </li>`
       )
       .join("");
-    const quote = center.vitals?.quote || "";
     return `
       <section class="pg-block pg-center-lab">
         <div class="pg-center-kicker">README Pokémon Center</div>
@@ -1211,15 +1588,6 @@
         <p class="pg-center-why">
           <strong>${escapeHtml(center.dna.emoji)} ${escapeHtml(center.dna.label)}.</strong>
           ${escapeHtml(center.dna.why || "")}
-        </p>
-        ${
-          quote
-            ? `<blockquote class="pg-center-quote">“${escapeHtml(quote)}”</blockquote>`
-            : ""
-        }
-        <p class="pg-center-times pg-meta">
-          Understand ~${escapeHtml(String(center.vitals?.understandSeconds ?? "?"))}s
-          · Install ~${escapeHtml(String(center.vitals?.installMinutes ?? "?"))} min
         </p>
         ${notes ? `<ul class="pg-center-notes">${notes}</ul>` : ""}
       </section>`;
@@ -1280,19 +1648,19 @@
         tone: "muted",
       },
       {
-        label: "Understand",
-        value: center.vitals?.understandSeconds != null ? `${center.vitals.understandSeconds}s` : "?",
-        tone: (center.vitals?.understandSeconds || 99) <= 18 ? "good" : "thin",
-      },
-      {
-        label: "Install",
-        value: center.vitals?.installMinutes != null ? `${center.vitals.installMinutes}m` : "?",
-        tone: (center.vitals?.installMinutes || 99) <= 2 ? "good" : "thin",
+        label: "Structure",
+        value: `${structure.score ?? "-"}/10`,
+        tone: scoreTone(structure.score),
       },
       {
         label: "Tests",
         value: how.hasTests ? "visible" : "not clear",
         tone: how.hasTests ? "good" : "thin",
+      },
+      {
+        label: "CI",
+        value: how.hasCi ? "configured" : "not clear",
+        tone: how.hasCi ? "good" : "thin",
       },
     ];
 
@@ -1323,8 +1691,7 @@
             <button type="button" class="pg-btn pg-btn-ghost pg-refresh" data-refresh title="Refresh analysis">↻</button>
           </div>
           <p class="pg-takeaway">${formatRichText(
-            center.vitals?.quote ||
-              about.blurb ||
+            about.blurb ||
               about.summary ||
               repo.description ||
               "Limited public description for this repository."
@@ -2310,6 +2677,10 @@
       starterNote = "";
       starterLoading = false;
       starterError = null;
+      repoChat = [];
+      repoChatDraft = "";
+      repoChatLoading = false;
+      repoChatError = null;
       repoSort = "interesting";
       repoLangFilter = "all";
       repoPokeFilter = "all";

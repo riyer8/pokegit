@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none" aria-hidden="true">
+  <defs>
+    <linearGradient id="pgBallRed" x1="64" y1="10" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF704E"/>
+      <stop offset=".62" stop-color="#E3350D"/>
+      <stop offset="1" stop-color="#B0180C"/>
+    </linearGradient>
+    <linearGradient id="pgBallWhite" x1="64" y1="64" x2="64" y2="118" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E8E2D8"/>
+    </linearGradient>
+    <radialGradient id="pgBallGloss" cx="44" cy="38" r="42" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity=".55"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="pgBallClip">
+      <circle cx="64" cy="64" r="54"/>
+    </clipPath>
+  </defs>
+  <circle cx="64" cy="64" r="54" fill="url(#pgBallWhite)"/>
+  <g clip-path="url(#pgBallClip)">
+    <path d="M10 64a54 54 0 0 1 108 0H10Z" fill="url(#pgBallRed)"/>
+    <rect x="10" y="58.5" width="108" height="11" fill="#16202C"/>
+    <circle cx="44" cy="38" r="42" fill="url(#pgBallGloss)"/>
+  </g>
+  <circle cx="64" cy="64" r="54" stroke="#16202C" stroke-width="5.5"/>
+  <circle cx="64" cy="64" r="15" fill="#16202C"/>
+  <circle cx="64" cy="64" r="9.5" fill="#F7F4EF"/>
+  <circle cx="64" cy="64" r="4.2" fill="#16202C"/>
+</svg>

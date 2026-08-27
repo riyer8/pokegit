@@ -11,6 +11,7 @@ import { openaiChatJson } from "./openai-request.js";
 import { buildRepoDrilldown } from "./insights.js";
 import { preciseBlurb, stripMarkdown } from "./text.js";
 import { buildReadmeCenter, maybePolishReadmeCenter, parsePackageHints } from "./readme-center.js";
+import { gatherRepoChatPack } from "./repo-chat.js";
 
 function cleanLine(s) {
   return String(s || "")
@@ -480,6 +481,17 @@ export async function analyzeRepoPage(owner, repoName) {
   });
   readmeCenter = await maybePolishReadmeCenter(readmeCenter, { repo, readme });
 
+  const chatPack = await gatherRepoChatPack({
+    owner,
+    repoName,
+    repo,
+    readme,
+    about,
+    readmeCenter,
+    languages,
+    signals,
+  });
+
   const howToTest = buildHowToTest({
     signals,
     commands,
@@ -530,6 +542,7 @@ export async function analyzeRepoPage(owner, repoName) {
     languages,
     about,
     readmeCenter,
+    chatPack,
     howToTest,
     structure,
     aiAssistance,

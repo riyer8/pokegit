@@ -1,5 +1,6 @@
 import { analyzeProfile, GitHubError } from "./lib/analyze.js";
 import { analyzeRepoPage } from "./lib/repo-page.js";
+import { chatWithRepo } from "./lib/repo-chat.js";
 import { getKeyStatus, saveStoredKeys, clearStoredKeys } from "./lib/secrets.js";
 import { compareProfiles } from "./lib/compare.js";
 import { buildImprovements, generateSteerStarters } from "./lib/improve.js";
@@ -23,6 +24,7 @@ const ALLOWED_TYPES = new Set([
   "POKEGIT_ANALYZE_PROFILE",
   "POKEGIT_FETCH_PROFILE",
   "POKEGIT_ANALYZE_REPO",
+  "POKEGIT_REPO_CHAT",
   "POKEGIT_COMPARE_PROFILES",
   "POKEGIT_GET_COMPARE_SUGGESTIONS",
   "POKEGIT_REFRESH_STARTERS",
@@ -80,6 +82,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleAnalyzeRepo(message.owner, message.repo, Boolean(message.force))
       .then((result) => sendResponse({ ok: true, ...result }))
       .catch((err) => sendResponse({ ok: false, error: publicError(err) }));
+    return true;
+  }
+
+  if (message.type === "POKEGIT_REPO_CHAT") {
+    handleRepoChat(message)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((err) => sendResponse({ ok: false, error: safeError(err) }));
     return true;
   }
 
@@ -156,6 +165,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "pokegit-repo-chat") return;
+  if (!isOwnExtension(port.sender)) {
+    port.disconnect();
+    return;
+  }
+  port.onMessage.addListener((message) => {
+    handleRepoChat({
+      ...message,
+      onDelta: (full) => {
+        try {
+          port.postMessage({ type: "delta", full });
+        } catch {
+          /* port closed */
+        }
+      },
+    })
+      .then((result) => {
+        try {
+          port.postMessage({ type: "done", reply: result.reply });
+        } catch {
+          /* ignore */
+        }
+      })
+      .catch((err) => {
+        try {
+          port.postMessage({ type: "error", error: safeError(err) });
+        } catch {
+          /* ignore */
+        }
+      });
+  });
+});
+
 function withImprovements(payload) {
   if (!payload || payload.insufficient) return payload;
   if (!payload.improvements) {
@@ -215,6 +258,20 @@ async function handleAnalyze(username, force = false) {
   return { payload, fromCache: false, cacheTtlMs: PERSIST_TTL_MS };
 }
 
+function uiRepoPayload(payload) {
+  if (!payload || payload.mode !== "repo") return payload;
+  const pack = payload.chatPack;
+  const chatBrief = pack
+    ? {
+        fileCount: pack.fileCount || 0,
+        excerptPaths: (pack.excerpts || []).map((e) => e.path).slice(0, 12),
+        truncated: Boolean(pack.truncated),
+      }
+    : null;
+  const { chatPack, ...rest } = payload;
+  return { ...rest, chatBrief };
+}
+
 async function handleAnalyzeRepo(owner, repo, force = false) {
   if (!isSafeGithubLogin(owner) || !isSafeGithubRepoName(repo)) {
     throw new GitHubError("Missing owner/repo", 400);
@@ -225,7 +282,7 @@ async function handleAnalyzeRepo(owner, repo, force = false) {
     const mem = memoryCache.get(key);
     if (mem && Date.now() - mem.at < MEMORY_TTL_MS) {
       return {
-        payload: { ...mem.payload, fromCache: true, cacheAgeMs: Date.now() - mem.at },
+        payload: { ...uiRepoPayload(mem.payload), fromCache: true, cacheAgeMs: Date.now() - mem.at },
         fromCache: true,
       };
     }
@@ -233,7 +290,7 @@ async function handleAnalyzeRepo(owner, repo, force = false) {
     if (disk?.payload) {
       memoryCache.set(key, { at: disk.at, payload: disk.payload });
       return {
-        payload: { ...disk.payload, fromCache: true, cacheAgeMs: disk.ageMs },
+        payload: { ...uiRepoPayload(disk.payload), fromCache: true, cacheAgeMs: disk.ageMs },
         fromCache: true,
       };
     }
@@ -247,7 +304,36 @@ async function handleAnalyzeRepo(owner, repo, force = false) {
   memoryCache.set(key, { at: Date.now(), payload });
   await setCachedPayload(key, payload);
 
-  return { payload, fromCache: false, cacheTtlMs: PERSIST_TTL_MS };
+  return { payload: uiRepoPayload(payload), fromCache: false, cacheTtlMs: PERSIST_TTL_MS };
+}
+
+async function handleRepoChat(message) {
+  const owner = String(message?.owner || "").trim();
+  const repo = String(message?.repo || "").trim();
+  const question = String(message?.question || "").trim();
+  if (!isSafeGithubLogin(owner) || !isSafeGithubRepoName(repo)) {
+    throw new GitHubError("Missing owner/repo", 400);
+  }
+  const key = `repo:${owner}/${repo}`.toLowerCase();
+  await handleAnalyzeRepo(owner, repo, false);
+  let pack = memoryCache.get(key)?.payload?.chatPack;
+  if (!pack) {
+    await handleAnalyzeRepo(owner, repo, true);
+    pack = memoryCache.get(key)?.payload?.chatPack || null;
+  }
+  if (!pack) throw new GitHubError("Could not pack this repository for chat", 400);
+  const result = await chatWithRepo({
+    pack,
+    history: message.history,
+    question,
+    onDelta: message.onDelta,
+  });
+  if (!result.ok) {
+    const err = new Error(result.error || "Chat failed");
+    err.status = result.missingKey ? 401 : 500;
+    throw err;
+  }
+  return { reply: result.reply };
 }
 
 async function handleCompareSuggestions(viewerLogin) {

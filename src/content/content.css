@@ -34,27 +34,19 @@
 }
 
 #pokegit-fab .pokegit-fab-mark {
-  width: 28px !important;
-  height: 28px !important;
-  border-radius: 50% !important;
-  background: linear-gradient(180deg, #e3350d 0 48%, #1a2332 48% 52%, #f4f1ec 52% 100%) !important;
-  box-shadow: 0 0 0 2px #1a2332, inset 0 0 0 2px rgba(255, 255, 255, 0.35) !important;
+  width: 30px !important;
+  height: 30px !important;
   position: relative !important;
   flex-shrink: 0 !important;
-  display: inline-block !important;
+  display: grid !important;
+  place-items: center !important;
 }
 
-#pokegit-fab .pokegit-fab-mark::after {
-  content: "" !important;
-  position: absolute !important;
-  top: 50% !important;
-  left: 50% !important;
-  width: 8px !important;
-  height: 8px !important;
-  margin: -4px 0 0 -4px !important;
-  border-radius: 50% !important;
-  background: #f4f1ec !important;
-  box-shadow: 0 0 0 2px #1a2332 !important;
+#pokegit-fab .pokegit-fab-mark .pokegit-ball {
+  width: 30px !important;
+  height: 30px !important;
+  display: block !important;
+  overflow: visible !important;
 }
 
 #pokegit-fab[hidden] {
