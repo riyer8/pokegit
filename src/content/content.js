@@ -9,13 +9,20 @@
   ]);
 
   const SCORE_ROWS = [
-    ["Architecture", "architecture", "🏗"],
-    ["Testing", "testing", "🧪"],
-    ["Maintenance", "maintenance", "🔄"],
-    ["Documentation", "documentation", "📚"],
-    ["Complexity", "complexity", "🛠"],
-    ["Activity", "activity", "🚀"],
+    ["AI / ML", "ai", "🤖"],
+    ["LLM / Transformers", "llm", "🧠"],
+    ["Infrastructure", "infra", "🪨"],
+    ["Research", "research", "🔬"],
+    ["Graphics", "graphics", "🎨"],
+    ["Frontend", "frontend", "✨"],
+    ["Systems", "systems", "⚙️"],
+    ["Security", "security", "🔒"],
+    ["Data", "data", "📊"],
+    ["Mobile", "mobile", "📱"],
   ];
+
+  const FOCUS_DISCLAIMER =
+    "CS focus areas inferred from public repo topics, descriptions, and structure. Not a complete picture of someone's skills.";
 
   const POKE_LEGEND = [
     { name: "Pikachu", emoji: "⚡", meaning: "Small, focused, useful", personality: "Small but energetic" },
@@ -111,9 +118,10 @@
   let starterNote = "";
   let starterLoading = false;
   let starterError = null;
-  let repoSort = "interesting";
+  let repoSort = "impressive";
   let repoLangFilter = "all";
   let repoPokeFilter = "all";
+  let activityChartView = "contributions";
   let loggedInUser = null;
   let repoChat = [];
   let repoChatDraft = "";
@@ -1019,6 +1027,7 @@
     if (activeTab === "profile") {
       body.innerHTML = renderProfileTab(lastPayload);
       body.querySelector("[data-refresh]")?.addEventListener("click", () => analyze(true));
+      wireActivityChart(body);
     } else if (activeTab === "repos") {
       body.innerHTML = renderReposTab(lastPayload);
       wireRepoExpands(body);
@@ -1033,6 +1042,7 @@
       activeTab = defaultTabForMode();
       body.innerHTML = renderProfileTab(lastPayload);
       body.querySelector("[data-refresh]")?.addEventListener("click", () => analyze(true));
+      wireActivityChart(body);
     }
     wireFloatingTips(body);
   }
@@ -1137,10 +1147,15 @@
   }
 
   function renderScoreBars(scores, animate = true) {
+    return renderFocusBars({ areas: scores }, animate);
+  }
+
+  function renderFocusBars(profileFocus, animate = true) {
+    const areas = profileFocus?.areas || {};
     return SCORE_ROWS.map(([label, key, icon], i) => {
-      const score = scores?.[key];
+      const score = areas[key];
       const v = score == null ? 0 : Math.max(0, Math.min(10, score));
-      const display = score == null ? "-" : v.toFixed(1);
+      const display = score == null || score < 2 ? "-" : v.toFixed(1);
       const delay = animate ? `style="--pg-i:${i}"` : "";
       return `
         <div class="pg-bar-row ${animate ? "pg-anim-bar" : ""}" ${delay}>
@@ -1185,13 +1200,8 @@
   }
 
   function renderScorePills(scores, limit = 4) {
-    const rows = SCORE_ROWS.map(([label, key, icon]) => ({
-      label,
-      key,
-      icon,
-      score: scores?.[key],
-    }))
-      .filter((d) => d.score != null)
+    const rows = (Array.isArray(scores) ? scores : [])
+      .filter((d) => d && d.score != null && d.score >= 3.5)
       .sort((a, b) => Number(b.score) - Number(a.score))
       .slice(0, limit);
 
@@ -1202,13 +1212,194 @@
           .map(
             (d) => `
           <span class="pg-pill pg-pill-${scoreTone(d.score)}">
-            <span class="pg-pill-icon" aria-hidden="true">${d.icon}</span>
+            <span class="pg-pill-icon" aria-hidden="true">${d.icon || "🎯"}</span>
             <span class="pg-pill-label">${escapeHtml(d.label)}</span>
             <strong>${Number(d.score).toFixed(1)}</strong>
           </span>`
           )
           .join("")}
       </div>`;
+  }
+
+  function renderActivityChartPanel(view) {
+    if (view.empty) {
+      return `<p class="pg-chart-empty">${escapeHtml(view.emptyMessage || "No data for this period.")}</p>`;
+    }
+    const bars = (view.bars || [])
+      .map(
+        (b) => `
+        <div class="pg-chart-bar-col" title="Week of ${escapeAttr(b.label)}: ${b.value}">
+          <div class="pg-chart-bar-fill pg-chart-${escapeAttr(view.accent)}" style="height:${b.height}%"></div>
+        </div>`
+      )
+      .join("");
+    const first = view.bars?.[0]?.label || "";
+    const mid = view.bars?.[Math.floor((view.bars.length - 1) / 2)]?.label || "";
+    const last = view.bars?.[view.bars.length - 1]?.label || "";
+
+    return `
+      <div class="pg-chart-hero">
+        <strong class="pg-chart-headline">${escapeHtml(view.headline)}</strong>
+        ${view.subhead ? `<span class="pg-chart-subhead">${escapeHtml(view.subhead)}</span>` : ""}
+      </div>
+      <div class="pg-chart-bars" role="img" aria-label="${escapeAttr(view.label)} chart, last 12 weeks">
+        ${bars}
+      </div>
+      <div class="pg-chart-axis" aria-hidden="true">
+        <span>${escapeHtml(first)}</span>
+        <span>${escapeHtml(mid)}</span>
+        <span>${escapeHtml(last)}</span>
+      </div>
+      <p class="pg-chart-caption">${escapeHtml(view.caption)}</p>`;
+  }
+
+  function renderActivityCharts(charts) {
+    if (!charts?.views?.length) return "";
+    const activeId =
+      charts.views.find((v) => v.id === activityChartView && !v.empty)?.id ||
+      charts.views.find((v) => v.id === activityChartView)?.id ||
+      charts.defaultId ||
+      charts.views[0].id;
+    const active = charts.views.find((v) => v.id === activeId) || charts.views[0];
+
+    const tabs = charts.views
+      .map(
+        (v) => `
+        <button
+          type="button"
+          class="pg-chart-tab${v.id === active.id ? " is-active" : ""}"
+          data-activity-chart-tab="${escapeAttr(v.id)}"
+          role="tab"
+          aria-selected="${v.id === active.id ? "true" : "false"}"
+          aria-controls="pg-chart-panel-${escapeAttr(v.id)}"
+        >${escapeHtml(v.shortLabel || v.label)}</button>`
+      )
+      .join("");
+
+    const panels = charts.views
+      .map(
+        (v) => `
+        <div
+          class="pg-chart-panel"
+          id="pg-chart-panel-${escapeAttr(v.id)}"
+          data-activity-chart-panel="${escapeAttr(v.id)}"
+          role="tabpanel"
+          ${v.id !== active.id ? "hidden" : ""}
+        >${renderActivityChartPanel(v)}</div>`
+      )
+      .join("");
+
+    return `
+      <div class="pg-chart-hub" data-activity-charts>
+        <div class="pg-chart-tabs" role="tablist" aria-label="Activity charts">${tabs}</div>
+        ${panels}
+      </div>`;
+  }
+
+  function wireActivityChart(body) {
+    const root = body.querySelector("[data-activity-charts]");
+    if (!root) return;
+    root.querySelectorAll("[data-activity-chart-tab]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const id = btn.dataset.activityChartTab;
+        if (!id || id === activityChartView) return;
+        activityChartView = id;
+        root.querySelectorAll("[data-activity-chart-tab]").forEach((b) => {
+          const on = b.dataset.activityChartTab === id;
+          b.classList.toggle("is-active", on);
+          b.setAttribute("aria-selected", on ? "true" : "false");
+        });
+        root.querySelectorAll("[data-activity-chart-panel]").forEach((p) => {
+          p.hidden = p.dataset.activityChartPanel !== id;
+        });
+      });
+    });
+  }
+
+  function renderActivityDashboard(payload) {
+    const impression = payload.activityImpression;
+    const dash = payload.activityDashboard;
+    if (!impression && !dash) return "";
+
+    const charts = dash?.charts;
+    const chartHtml = renderActivityCharts(charts);
+
+    const stats = (dash?.stats || [])
+      .slice(0, 3)
+      .map(
+        (s) => `
+        <span class="pg-snap pg-snap-${escapeAttr(s.tone || "muted")}" title="${escapeAttr(s.hint || "")}">
+          <span class="pg-snap-k">${escapeHtml(s.label)}</span>
+          <strong>${escapeHtml(s.value)}</strong>
+        </span>`
+      )
+      .join("");
+
+    const workRows = (dash?.whereWorkLands || [])
+      .slice(0, 5)
+      .map(
+        (r) => `
+        <li class="pg-work-row">
+          <div class="pg-work-top">
+            <strong>${escapeHtml(r.name)}</strong>
+            <span class="pg-work-when">${r.daysSince < 1 ? "today" : `${r.daysSince}d ago`}</span>
+          </div>
+          <p class="pg-work-desc">${escapeHtml(r.oneLiner || r.language || "No description")}</p>
+          <div class="pg-work-meta">
+            ${r.focus ? `<span>${escapeHtml(r.focus)}</span>` : ""}
+            ${r.pushes > 0 ? `<span>${r.pushes} push${r.pushes === 1 ? "" : "es"}</span>` : ""}
+            ${r.stars > 0 ? `<span>★ ${r.stars}</span>` : ""}
+            ${r.language ? `<span>${escapeHtml(r.language)}</span>` : ""}
+          </div>
+        </li>`
+      )
+      .join("");
+
+    const readLines = (dash?.readLines || [])
+      .map(
+        (r) => `
+        <li class="pg-read-line">
+          <span aria-hidden="true">${r.icon}</span>
+          <span>${escapeHtml(r.text)}</span>
+        </li>`
+      )
+      .join("");
+
+    const langBars = (dash?.languages || [])
+      .map(
+        (l) => `
+        <div class="pg-lang-bar-row">
+          <span class="pg-lang-bar-label">${escapeHtml(l.name)}</span>
+          <div class="pg-lang-bar-track"><div class="pg-lang-bar-fill" style="width:${l.height}%"></div></div>
+          <span class="pg-lang-bar-val">${l.percent}%</span>
+        </div>`
+      )
+      .join("");
+
+    return `
+      <section class="pg-activity-chart pg-activity-dashboard">
+        <p class="pg-glance-label">Activity picture</p>
+        ${chartHtml || ""}
+        ${!chartHtml && stats ? `<div class="pg-snaps pg-activity-stats">${stats}</div>` : ""}
+        ${impression?.impression ? `<p class="pg-activity-impression">${escapeHtml(impression.impression)}</p>` : ""}
+        ${readLines ? `<ul class="pg-read-lines">${readLines}</ul>` : ""}
+        ${
+          workRows
+            ? `<div class="pg-work-block">
+                <p class="pg-glance-label">Where work is landing</p>
+                <ul class="pg-work-list">${workRows}</ul>
+              </div>`
+            : ""
+        }
+        ${
+          langBars
+            ? `<div class="pg-lang-block">
+                <p class="pg-glance-label">Language footprint</p>
+                <div class="pg-lang-bars">${langBars}</div>
+              </div>`
+            : ""
+        }
+      </section>`;
   }
 
   function renderSnapChips(chips = []) {
@@ -1254,7 +1445,9 @@
       glance.headline || summary.glanceHeadline || user.name || `@${user.login}`;
     const oneLiner = (glance.oneLiner || summary.oneLiner || summary.style || "")
       .replace(/^["“]|["”]$/g, "");
-    const scores = payload.profileScores || {};
+    const focusPills = glance.strongest?.length
+      ? glance.strongest
+      : payload.profileFocus?.top || [];
 
     return `
       <section class="pg-glance pg-anim-in">
@@ -1270,8 +1463,9 @@
             ? `<p class="pg-takeaway">${formatRichText(oneLiner)}</p>`
             : ""
         }
-        <p class="pg-glance-label">Strongest public signals</p>
-        ${renderScorePills(scores, 4)}
+        ${renderActivityDashboard(payload)}
+        <p class="pg-glance-label">What they build</p>
+        ${renderScorePills(focusPills, 4)}
       </section>`;
   }
 
@@ -1352,29 +1546,6 @@
             .join("")}
         </ul>
       </div>`;
-  }
-
-  function renderAiCard(ai) {
-    if (!ai) return "";
-    const level = String(ai.label || ai.level || "none");
-    const tone =
-      /high/i.test(level) ? "mid" : /low|none/i.test(level) ? "muted" : "mid";
-    return `
-      <section class="pg-block pg-ai-card pg-anim-fade" style="--pg-i:3">
-        <div class="pg-ai-head">
-          <h3 class="pg-section-title">AI tooling signal</h3>
-          <span class="pg-pill pg-pill-${tone}"><strong>${escapeHtml(level)}</strong></span>
-        </div>
-        <p class="pg-meta">Confidence: ${escapeHtml(ai.confidence || "low")} · never a % of code</p>
-        <p class="pg-prose">${linkPokemonTerms(ai.summary || "")}</p>
-        ${
-          ai.evidence?.length
-            ? `<ul class="pg-ai-evidence">${ai.evidence
-                .map((e) => `<li>${linkPokemonTerms(e)}</li>`)
-                .join("")}</ul>`
-            : `<p class="pg-section-lede">No strong public tooling markers. That does not prove AI was unused.</p>`
-        }
-      </section>`;
   }
 
   function renderRepoChat(payload) {
@@ -1611,7 +1782,11 @@
     for (const n of structure.notes || []) {
       if (n.ok) goods.push(n.text);
     }
-    for (const [label, key] of SCORE_ROWS) {
+    for (const [label, key] of [
+      ["Architecture", "architecture"],
+      ["Activity", "activity"],
+      ["Complexity", "complexity"],
+    ]) {
       if ((scores[key] || 0) >= 7.5) {
         goods.push(`${label} reads strong (${Number(scores[key]).toFixed(1)}/10)`);
       }
@@ -1803,8 +1978,6 @@
           <p class="pg-disclaimer">${escapeHtml(DISCLAIMER)}</p>
         </section>
 
-        ${renderAiCard(payload.aiAssistance)}
-
         ${
           pokemon.why
             ? `<section class="pg-block">
@@ -1834,8 +2007,7 @@
         ${strengths || `<p class="pg-section-lede">No clear green flags from this public sample yet.</p>`}
         ${concerns}
         ${interesting}
-      </div>
-      ${renderAiCard(summary?.aiAssistance)}`;
+      </div>`;
   }
 
   function renderInsufficient(payload) {
@@ -1851,10 +2023,8 @@
 
   function renderProfileTab(payload) {
     if (payload.insufficient) return renderInsufficient(payload);
-    const { profileScores, summary, observations, evidence, surprises } = payload;
+    const { profileFocus, summary, observations, evidence, surprises } = payload;
     const repos = payload.analyzedRepos || [];
-    const withTests = repos.filter((r) => r.signals?.hasTests).length;
-    const withCi = repos.filter((r) => r.signals?.hasCi).length;
     const when = formatAnalyzedAt(payload.analyzedAt || payload.fetchedAt);
     const cacheNote = payload.fromCache
       ? ` · from local cache`
@@ -1866,6 +2036,8 @@
       .filter((o, i, arr) => arr.findIndex((x) => x.id === o.id || x.title === o.title) === i)
       .slice(0, 4);
 
+    const focusBars = (profileFocus?.top || []).slice(0, 6);
+
     return `
       ${renderGlance(payload)}
       <div class="pg-meta-bar">
@@ -1875,13 +2047,13 @@
 
       <section class="pg-block pg-block-good pg-anim-fade" style="--pg-i:0">
         <h3 class="pg-section-title">Good characteristics</h3>
-        <p class="pg-section-lede">Strengths visible from public repos. Not a seniority grade.</p>
+        <p class="pg-section-lede">What their public work actually signals. Not a seniority grade.</p>
         ${renderHighlightItems(summary?.strengths, "Nothing clear enough to call a strength yet.")}
       </section>
 
       ${renderObservations(topObs, {
         title: "What stands out",
-        lede: "Highest-signal patterns with evidence you can check.",
+        lede: "Builder type, activity, and repos worth knowing.",
         limit: 4,
       })}
 
@@ -1896,21 +2068,15 @@
       }
 
       <section class="pg-block pg-anim-fade" style="--pg-i:2">
-        <h3 class="pg-section-title">Score snapshot</h3>
-        <p class="pg-section-lede">Experimental readings of public signals across ${repos.length} repos.</p>
-        ${renderScorePills(profileScores, 6)}
-        <div class="pg-activity pg-activity-compact">
-          <div class="pg-activity-row"><span>Repos with tests</span><strong>${withTests}/${repos.length}</strong></div>
-          <div class="pg-activity-row"><span>Repos with CI</span><strong>${withCi}/${repos.length}</strong></div>
-        </div>
+        <h3 class="pg-section-title">CS focus snapshot</h3>
+        <p class="pg-section-lede">Inferred focus areas across ${repos.length} analyzed repos.</p>
+        ${renderScorePills(focusBars, 6)}
         <details class="pg-mini-details">
-          <summary>Full score bars</summary>
-          <div class="pg-bars">${renderScoreBars(profileScores, false)}</div>
-          <p class="pg-disclaimer">${escapeHtml(DISCLAIMER)}</p>
+          <summary>All focus bars</summary>
+          <div class="pg-bars">${renderFocusBars(profileFocus, false)}</div>
+          <p class="pg-disclaimer">${escapeHtml(FOCUS_DISCLAIMER)}</p>
         </details>
       </section>
-
-      ${renderAiCard(summary?.aiAssistance)}
 
       ${
         insightItems(summary?.interesting).length
@@ -1943,36 +2109,29 @@
   }
 
   function renderRepoDrilldown(item) {
-    const { repo, pokemon, scores, signals, drilldown } = item;
+    const { repo, pokemon, focusScores, signals, drilldown } = item;
     const dd = drilldown || {};
-    const scoreRows = [
-      ["Quality", scores.architecture],
-      ["Testing", scores.testing],
-      ["Maintenance", scores.maintenance],
-      ["Complexity", scores.complexity],
-      ["Docs", scores.documentation],
-      ["Activity", scores.activity],
-    ]
-      .map(
-        ([label, v]) => `
+    const topFocus = Object.entries(focusScores || {})
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 4)
+      .filter(([, v]) => v >= 3.5);
+    const scoreRows = topFocus
+      .map(([key, v]) => {
+        const meta = SCORE_ROWS.find(([, k]) => k === key);
+        const label = meta ? meta[0] : key;
+        return `
         <div class="pg-mini-score">
           <span>${escapeHtml(label)}</span>
-          <strong>${v == null ? "-" : Number(v).toFixed(1)}</strong>
-        </div>`
-      )
-      .join("");
-
-    const checks = (dd.checks || [])
-      .map(
-        (c) => `
-        <li class="${c.ok ? "is-ok" : "is-miss"}">
-          <span class="pg-check">${c.ok ? "✓" : "·"}</span>
-          ${escapeHtml(c.text)}
-        </li>`
-      )
+          <strong>${Number(v).toFixed(1)}</strong>
+        </div>`;
+      })
       .join("");
 
     const interesting = (dd.interesting || [])
+      .map((t) => `<li>• ${escapeHtml(t)}</li>`)
+      .join("");
+
+    const focusLines = (dd.focusLines || [])
       .map((t) => `<li>• ${escapeHtml(t)}</li>`)
       .join("");
 
@@ -1981,13 +2140,13 @@
         <p class="pg-drill-role">${escapeHtml(dd.roleGuess || repo.language || "Project")} · “${escapeHtml(
       dd.personality || pokemon.personality || pokemon.blurb
     )}”</p>
-        <div class="pg-mini-scores">${scoreRows}</div>
+        ${scoreRows ? `<div class="pg-mini-scores">${scoreRows}</div>` : ""}
         <div class="pg-drill-why">
-          <h4>${escapeHtml(dd.whyTitle || `Why ${pokemon.name}?`)}</h4>
-          <p>${linkPokemonTerms(dd.whyBody || pokemon.why || pokemon.signal)}</p>
+          <h4>${escapeHtml(dd.whyTitle || "What this repo is")}</h4>
+          <p>${linkPokemonTerms(dd.whyBody || item.oneLiner || pokemon.signal)}</p>
         </div>
-        ${checks
-        ? `<div class="pg-drill-block"><h4>Signals</h4><ul class="pg-evidence">${checks}</ul></div>`
+        ${focusLines
+        ? `<div class="pg-drill-block"><h4>Focus signals</h4><ul class="pg-interesting-list">${focusLines}</ul></div>`
         : ""
       }
         ${interesting
@@ -1998,11 +2157,44 @@
           <span>★ ${repo.stargazers || 0}</span>
           <span>${escapeHtml(repo.language || "-")}</span>
           <span>Updated ${escapeHtml(relativeTime(repo.pushedAt))}</span>
-          <span>Tests ${signals.hasTests ? "yes" : "no"}</span>
-          <span>CI ${signals.hasCi ? "yes" : "no"}</span>
+          ${
+            signals.recentCommitApprox
+              ? `<span>≈${signals.recentCommitApprox} recent public commits</span>`
+              : ""
+          }
         </div>
         <a class="pg-repo-link" href="${escapeAttr(repo.htmlUrl)}" target="_blank" rel="noopener noreferrer">Open on GitHub →</a>
       </div>`;
+  }
+
+  function repoImpressivenessScore(item) {
+    const repo = item.repo;
+    const stars = repo.stargazers || 0;
+    const days = (Date.now() - new Date(repo.pushedAt).getTime()) / 864e5;
+    const recency = Math.max(0, 1 - days / 400);
+    const focusTop = Math.max(...Object.values(item.focusScores || {}), 0);
+    const commits = item.signals?.recentCommitApprox || 0;
+    const pokeTier = {
+      Dragonite: 2.8,
+      Alakazam: 2.5,
+      Golem: 2.2,
+      Umbreon: 2,
+      Sylveon: 1.8,
+      Blastoise: 1.6,
+      Pikachu: 1.4,
+      Ditto: 1.2,
+      Eevee: 1,
+      Snorlax: 0.4,
+      Blissey: 1.3,
+    };
+    const tier = pokeTier[item.pokemon?.name] || 1.2;
+    return (
+      Math.log10(stars + 1) * 2.8 +
+      recency * 3.5 +
+      focusTop * 0.35 +
+      Math.min(commits, 40) * 0.06 +
+      tier
+    );
   }
 
   function filterSortRepos(repos) {
@@ -2014,25 +2206,16 @@
       list = list.filter((a) => a.pokemon?.name === repoPokeFilter);
     }
 
-    const quality = (a) =>
-      ((a.scores?.architecture || 0) + (a.scores?.testing || 0) + (a.scores?.maintenance || 0)) / 3;
-
     list.sort((a, b) => {
       if (repoSort === "stars") return (b.repo.stargazers || 0) - (a.repo.stargazers || 0);
       if (repoSort === "activity") {
         return new Date(b.repo.pushedAt) - new Date(a.repo.pushedAt);
       }
-      if (repoSort === "quality") return quality(b) - quality(a);
       if (repoSort === "pokemon") {
         return String(a.pokemon?.name || "").localeCompare(String(b.pokemon?.name || ""));
       }
-      // interesting: quality + activity + stars blend
-      const score = (x) => {
-        const days = (Date.now() - new Date(x.repo.pushedAt).getTime()) / 864e5;
-        const recency = Math.max(0, 1 - days / 365);
-        return quality(x) * 1.2 + Math.log10((x.repo.stargazers || 0) + 1) * 1.5 + recency * 3;
-      };
-      return score(b) - score(a);
+      // impressive (default): stars + recency + focus + recent commits
+      return repoImpressivenessScore(b) - repoImpressivenessScore(a);
     });
     return list;
   }
@@ -2052,6 +2235,8 @@
         const tip = pokemon.personality
           ? `${pokemon.name}: ${pokemon.personality}`
           : `${pokemon.name}: ${pokemon.signal || pokemon.blurb}`;
+        const tag = pokemon.personality || pokemon.blurb;
+        const desc = item.oneLiner || repo.description || "";
         return `
           <div class="pg-repo ${open ? "is-open" : ""}" data-repo-id="${repo.id}" style="--pg-i:${i}">
             <button type="button" class="pg-repo-head" data-expand="${repo.id}" aria-expanded="${open ? "true" : "false"}">
@@ -2062,15 +2247,14 @@
               <div class="pg-repo-text">
                 <div class="pg-repo-title">
                   <span class="pg-repo-name">${escapeHtml(repo.name)}</span>
-                  <span class="pg-repo-poke">${escapeHtml(pokemon.name)}</span>
+                  <span class="pg-repo-date">${escapeHtml(relativeTime(repo.pushedAt))}</span>
                 </div>
-                <p class="pg-repo-blurb">${escapeHtml(pokemon.personality || pokemon.blurb)}</p>
-                ${pokemon.why
-            ? `<p class="pg-repo-why-preview"><span class="pg-why-label">Why ${escapeHtml(
-              pokemon.name
-            )}?</span> ${escapeHtml(pokemon.why)}</p>`
-            : ""
-          }
+                <p class="pg-repo-blurb">${escapeHtml(tag)}</p>
+                ${desc ? `<p class="pg-repo-desc">${escapeHtml(desc)}</p>` : ""}
+                <div class="pg-repo-meta-inline">
+                  ${repo.language ? `<span>${escapeHtml(repo.language)}</span>` : ""}
+                  ${(repo.stargazers || 0) > 0 ? `<span>★ ${repo.stargazers}</span>` : ""}
+                </div>
               </div>
               <span class="pg-repo-chevron" aria-hidden="true">${open ? "▾" : "▸"}</span>
             </button>
@@ -2102,10 +2286,9 @@
       <div class="pg-repo-filters">
         <label>Sort
           <select data-repo-sort>
-            <option value="interesting" ${repoSort === "interesting" ? "selected" : ""}>Most interesting</option>
-            <option value="activity" ${repoSort === "activity" ? "selected" : ""}>Activity</option>
+            <option value="impressive" ${repoSort === "impressive" ? "selected" : ""}>Most impressive</option>
+            <option value="activity" ${repoSort === "activity" ? "selected" : ""}>Last commit</option>
             <option value="stars" ${repoSort === "stars" ? "selected" : ""}>Stars</option>
-            <option value="quality" ${repoSort === "quality" ? "selected" : ""}>Quality signals</option>
             <option value="pokemon" ${repoSort === "pokemon" ? "selected" : ""}>Pokémon</option>
           </select>
         </label>
@@ -2472,19 +2655,74 @@
 
   function renderImprovementsTab(payload) {
     const pack = payload.improvements;
-    if (!pack?.actions?.length) {
+    const positioning = pack?.positioning;
+    if (!pack?.actions?.length && !positioning) {
       return `
         <div class="pg-improve pg-anim-in">
           <div class="pg-improve-bg" aria-hidden="true"></div>
           <div class="pg-improve-inner">
             <p class="pg-improve-kicker">For @${escapeHtml(payload.user.login)} only</p>
-            <h3 class="pg-improve-title">Improvements</h3>
-            <p class="pg-style">Not enough public signals yet to suggest concrete next steps. Ship a little more in public, then refresh.</p>
+            <h3 class="pg-improve-title">Public presence</h3>
+            <p class="pg-style">Not enough public signals yet to coach your profile. Ship a little more in public, then refresh.</p>
           </div>
         </div>`;
     }
 
-    const actions = pack.actions
+    const outsiderRead = positioning?.outsiderRead
+      ? `<section class="pg-position-block pg-anim-fade" style="--pg-i:0">
+          <h4 class="pg-improve-section">How strangers read you</h4>
+          <p class="pg-outsider-read">${escapeHtml(positioning.outsiderRead)}</p>
+        </section>`
+      : "";
+
+    const taglines = (positioning?.taglines || [])
+      .map(
+        (t, i) => `
+        <article class="pg-tagline-card pg-anim-fade" style="--pg-i:${i}">
+          <p class="pg-tagline-text">"${escapeHtml(t.text)}"</p>
+          <p class="pg-tagline-why">${escapeHtml(t.why)}</p>
+        </article>`
+      )
+      .join("");
+
+    const taglineSection = taglines
+      ? `<section class="pg-position-block pg-anim-fade" style="--pg-i:1">
+          <h4 class="pg-improve-section">Tagline options</h4>
+          <p class="pg-section-lede">Copy one into your GitHub bio, LinkedIn headline, or profile README.</p>
+          <div class="pg-tagline-list">${taglines}</div>
+        </section>`
+      : "";
+
+    const present = positioning?.present;
+    const pinRows = (present?.pins || [])
+      .map(
+        (p, i) => `
+        <li class="pg-pin-row">
+          <span class="pg-pin-rank">${i + 1}</span>
+          <div>
+            <strong>${escapeHtml(p.repo)}</strong>
+            <span class="pg-pin-reason">${escapeHtml(p.reason)}</span>
+          </div>
+        </li>`
+      )
+      .join("");
+    const presentSection = present
+      ? `<section class="pg-position-block pg-anim-fade" style="--pg-i:2">
+          <h4 class="pg-improve-section">How to present yourself</h4>
+          <p class="pg-present-lead">${escapeHtml(present.lead)}</p>
+          <p class="pg-present-voice">${escapeHtml(present.voice)}</p>
+          ${pinRows ? `<ol class="pg-pin-list">${pinRows}</ol>` : ""}
+          ${
+            present.downplay?.length
+              ? `<p class="pg-present-downplay"><strong>Downplay or archive:</strong> ${escapeHtml(
+                  present.downplay.join(", ")
+                )}</p>`
+              : ""
+          }
+        </section>`
+      : "";
+
+    const actions = (pack.actions || [])
       .map(
         (a, i) => `
         <article class="pg-improve-card pg-anim-fade" style="--pg-i:${i}">
@@ -2521,6 +2759,24 @@
             <h4>${escapeHtml(s.title)}</h4>
             <p>${escapeHtml(s.pitch)}</p>
             <p class="pg-starter-leap"><strong>Leap from:</strong> ${escapeHtml(s.leapFrom)}</p>
+            ${
+              (s.pillars || []).length
+                ? `<div class="pg-starter-pillars">
+                    <span class="pg-starter-pillars-label">Builds toward</span>
+                    <div class="pg-starter-pillar-list">
+                      ${(s.pillars || [])
+                        .map(
+                          (p) => `
+                        <span class="pg-starter-pillar" title="${escapeAttr(p.label)}">
+                          <span class="pg-starter-pillar-icon" aria-hidden="true">${p.icon || "🎯"}</span>
+                          <span>${escapeHtml(p.label)}</span>
+                        </span>`
+                        )
+                        .join("")}
+                    </div>
+                  </div>`
+                : ""
+            }
             <div class="pg-starter-tags">${(s.stack || [])
               .map((t) => `<span>${escapeHtml(t)}</span>`)
               .join("")}</div>
@@ -2552,24 +2808,28 @@
           <p class="pg-improve-kicker">Logged in as @${escapeHtml(
             loggedInUser || payload.user.login
           )} · your public profile only</p>
-          <h3 class="pg-improve-title">Improvements</h3>
+          <h3 class="pg-improve-title">Public presence</h3>
           <p class="pg-improve-lede">
-            Actionable ways to level up what strangers see. Based on this analysis, not private repos.
+            How to present yourself to recruiters, collaborators, and anyone landing on your GitHub cold.
           </p>
+          ${outsiderRead}
+          ${taglineSection}
+          ${presentSection}
           <h4 class="pg-improve-section">Do these next</h4>
+          <p class="pg-section-lede">Highest-impact moves for what strangers actually see.</p>
           <div class="pg-improve-list">${actions}</div>
           <div class="pg-starter-head">
-            <h4 class="pg-improve-section">Starter projects to leap from</h4>
+            <h4 class="pg-improve-section">Projects that sharpen your story</h4>
             <button type="button" class="pg-btn pg-btn-ghost pg-refresh" data-starters-refresh title="Refresh starter ideas" ${
               starterLoading ? "disabled" : ""
             }>↻</button>
           </div>
-          <p class="pg-section-lede">Five weekend-scale public projects that bounce off what you already know. Refresh for a new batch, or tell PokéGit where you want to steer.</p>
+          <p class="pg-section-lede">Weekend-scale repos aligned with your focus. Each card shows which CS pillars it strengthens.</p>
           <div class="pg-steer">
             ${steerThread}
             <div class="pg-steer-form">
               <textarea class="pg-input" data-steer-input rows="2" maxlength="280"
-                placeholder="What kinds of projects do you want to steer toward?"
+                placeholder="Where do you want your public story to go? (e.g. more ML demos, cleaner portfolio)"
                 ${starterLoading ? "disabled" : ""}>${escapeHtml(starterDraft)}</textarea>
               <button type="button" class="pg-btn pg-btn-primary" data-steer-send ${
                 starterLoading ? "disabled" : ""
@@ -2681,9 +2941,10 @@
       repoChatDraft = "";
       repoChatLoading = false;
       repoChatError = null;
-      repoSort = "interesting";
+      repoSort = "impressive";
       repoLangFilter = "all";
       repoPokeFilter = "all";
+      activityChartView = "contributions";
 
       if (!ctx.mode) {
         closePanel();

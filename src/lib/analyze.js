@@ -15,7 +15,13 @@ import {
   buildSurprises,
 } from "./insights.js";
 import { buildImprovements } from "./improve.js";
-import { summarizePublicActivity } from "./activity.js";
+import { summarizePublicActivity, buildWeeklyPublicActivity, buildActivityImpression, buildActivityDashboard } from "./activity.js";
+import { fetchContributionPulse } from "./contributions.js";
+import {
+  scoreRepoFocus,
+  aggregateProfileFocus,
+  repoOneLiner,
+} from "./focus.js";
 
 export { GitHubError };
 
@@ -86,16 +92,24 @@ async function fetchRepos(username) {
   return { repos: owned, forkCount, rateLimitRemaining };
 }
 
-/** Recent PushEvents → approximate commit volume (public events, ~90d). */
+/** Recent PushEvents (~90d). Paginate because commit counts are often stripped. */
 async function fetchPublicEvents(username) {
+  const events = [];
+  let rateLimitRemaining = null;
   try {
-    const { data, rateLimitRemaining } = await request(
-      `/users/${encodeURIComponent(username)}/events/public?per_page=100`
-    );
-    return { events: Array.isArray(data) ? data : [], rateLimitRemaining };
+    for (let page = 1; page <= 3; page++) {
+      const { data, rateLimitRemaining: rem } = await request(
+        `/users/${encodeURIComponent(username)}/events/public?per_page=100&page=${page}`
+      );
+      rateLimitRemaining = rem;
+      if (!Array.isArray(data) || data.length === 0) break;
+      events.push(...data);
+      if (data.length < 100) break;
+    }
   } catch {
-    return { events: [], rateLimitRemaining: null };
+    return { events: [], rateLimitRemaining };
   }
+  return { events, rateLimitRemaining };
 }
 
 function languageSummary(repos) {
@@ -187,8 +201,9 @@ export async function analyzeProfile(username, onProgress = () => {}) {
   const top = selectTopRepos(repos, 8);
   onProgress("inspect");
 
-  const [{ events, rateLimitRemaining: remEvents }, analyzedRepos] = await Promise.all([
+  const [{ events, rateLimitRemaining: remEvents }, contributionPulse, analyzedRepos] = await Promise.all([
     fetchPublicEvents(user.login),
+    fetchContributionPulse(user.login),
     Promise.all(
       top.map(async (repo) => {
         let signals;
@@ -209,7 +224,10 @@ export async function analyzeProfile(username, onProgress = () => {}) {
         }
         const scores = scoreRepo(repo, signals);
         const pokemon = assignPokemon(repo, scores, signals);
-        const item = { repo, signals, scores, pokemon };
+        signals.focusTags = pokemon.tags || [];
+        const focusScores = scoreRepoFocus(repo, signals);
+        const item = { repo, signals, scores, focusScores, pokemon };
+        item.oneLiner = repoOneLiner(repo, pokemon, signals);
         item.drilldown = buildRepoDrilldown(item);
         return item;
       })
@@ -217,25 +235,41 @@ export async function analyzeProfile(username, onProgress = () => {}) {
   ]);
 
   const profileScores = aggregateProfileScores(analyzedRepos);
+  const profileFocus = aggregateProfileFocus(analyzedRepos);
+  const langs = languageSummary(repos);
   const activity = summarizePublicActivity(events, {
     analyzedRepos,
     profileActivityScore: profileScores.activity,
   });
+  const weeklyActivity = buildWeeklyPublicActivity(events, repos, 12);
+  const activityImpression = buildActivityImpression(activity, contributionPulse, weeklyActivity);
+  const activityDashboard = buildActivityDashboard({
+    activity,
+    pulse: contributionPulse,
+    impression: activityImpression,
+    weekly: weeklyActivity,
+    analyzedRepos,
+    allRepos: repos,
+    languageSummary: langs,
+    profileFocus,
+  });
 
-  // Attach per-repo recent commit estimates from public push events
+  // Attach per-repo recent push/commit estimates from public events
   for (const item of analyzedRepos) {
-    const n = activity.commitsByRepo?.[item.repo.name];
+    const pushes = activity.reposPushed?.find((r) => r.name === item.repo.name)?.pushes;
+    const commits = activity.commitsByRepo?.[item.repo.name];
+    const n = pushes ?? commits;
     if (n != null) {
       item.signals.commitSampleCount = n;
       item.signals.recentCommitApprox = n;
+      item.signals.recentPushCount = pushes ?? null;
     }
   }
 
-  const langs = languageSummary(repos);
   const aiAssistanceHeuristic = detectAiAssistance(analyzedRepos);
-  const observations = buildObservations(analyzedRepos, profileScores, langs, activity);
-  const evidence = buildEvidence(analyzedRepos, profileScores, activity);
-  const surprises = buildSurprises(analyzedRepos, profileScores, langs);
+  const observations = buildObservations(analyzedRepos, profileFocus, langs, activity, activityImpression);
+  const evidence = buildEvidence(analyzedRepos, profileFocus, activity, activityImpression);
+  const surprises = buildSurprises(analyzedRepos, profileFocus, langs);
 
   const totalStars = analyzedRepos.reduce((s, a) => s + (a.repo.stargazers || 0), 0);
   const anySignal = analyzedRepos.some(
@@ -257,8 +291,12 @@ export async function analyzeProfile(username, onProgress = () => {}) {
     user,
     analyzedRepos,
     profileScores,
+    profileFocus,
     languageSummary: langs,
     activity,
+    activityImpression,
+    activityDashboard,
+    contributionPulse,
     hasProfileReadme,
     forkCount,
     aiAssistanceHeuristic,
@@ -297,7 +335,16 @@ export async function analyzeProfile(username, onProgress = () => {}) {
     summary = emptySummary(insufficientReason);
   }
 
-  const glance = buildGlance(user, profileScores, observations, summary, langs, activity);
+  const glance = buildGlance(
+    user,
+    profileFocus,
+    observations,
+    summary,
+    langs,
+    activity,
+    activityImpression,
+    contributionPulse
+  );
   const improvements = insufficient ? null : buildImprovements({ ...draft, summary, glance });
   return { ...draft, summary, glance, improvements };
 }

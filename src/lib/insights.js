@@ -3,7 +3,13 @@
  * Observations > raw score dumps.
  */
 
-import { activityAdjective, activityVibe } from "./activity.js";
+import { activityVibe } from "./activity.js";
+import {
+  deriveBuilderHeadline,
+  deriveBuilderOneLiner,
+  focusAreaLabel,
+  repoOneLiner,
+} from "./focus.js";
 
 function daysSince(iso) {
   if (!iso) return 9999;
@@ -32,37 +38,37 @@ function repoNames(list, limit = 2) {
 /**
  * Build checklist evidence from the analyzed set.
  */
-export function buildEvidence(analyzedRepos, profileScores, activity = null) {
+export function buildEvidence(analyzedRepos, profileFocus, activity = null, activityImpression = null) {
   const n = analyzedRepos.length || 1;
-  const withTests = analyzedRepos.filter((a) => a.signals?.hasTests).length;
-  const withCi = analyzedRepos.filter((a) => a.signals?.hasCi).length;
-  const withReadme = analyzedRepos.filter((a) => a.signals?.hasReadme).length;
   const active90 = analyzedRepos.filter((a) => daysSince(a.repo.pushedAt) < 90).length;
-  const active365 = analyzedRepos.filter((a) => daysSince(a.repo.pushedAt) < 365).length;
-  const mature = analyzedRepos.filter((a) => ageYears(a.repo.createdAt) >= 2).length;
+  const topFocus = (profileFocus?.top || []).slice(0, 3);
 
   const items = [
     { ok: n >= 1, text: `${n} owned non-fork repositories analyzed` },
-    { ok: withTests > 0, text: `Automated tests visible in ${withTests}/${n}` },
-    { ok: withCi > 0, text: `CI configured in ${withCi}/${n}` },
-    { ok: withReadme > 0, text: `README present in ${withReadme}/${n}` },
+    { ok: topFocus.length > 0, text: `Strongest focus: ${topFocus.map((f) => f.label).join(", ") || "mixed"}` },
     { ok: active90 > 0, text: `${active90}/${n} pushed within the last 90 days` },
-    { ok: active365 >= Math.ceil(n / 2), text: `${active365}/${n} touched in the last year` },
-    { ok: mature > 0, text: `${mature} project(s) are 2+ years old` },
     {
-      ok: (profileScores.testing || 0) >= 7,
-      text: `Testing score ${profileScores.testing ?? "-"}/10`,
-    },
-    {
-      ok: (profileScores.maintenance || 0) >= 7,
-      text: `Maintenance score ${profileScores.maintenance ?? "-"}/10`,
+      ok: (activity?.commitApprox || 0) > 0,
+      text: activityImpression?.impression || activity?.sampleNote || "Public push activity sampled",
     },
   ];
 
-  if (activity?.commitApprox > 0) {
-    items.splice(5, 0, {
+  if (activityImpression?.yearCount != null) {
+    items.push({
       ok: true,
-      text: `≈${activity.commitApprox} recent public commits across ${activity.reposTouched?.length || 0} repos`,
+      text: `~${activityImpression.yearCount} contributions on year graph${
+        activityImpression.includesPrivate ? " (may include private)" : ""
+      }`,
+    });
+  }
+
+  if (activity?.pushCount > 0 || activity?.commitApprox > 0) {
+    const pushLabel = activity.pushCount
+      ? `${activity.pushCount} public pushes`
+      : `≈${activity.commitApprox} public commits`;
+    items.splice(3, 0, {
+      ok: true,
+      text: `${pushLabel} across ${activity.reposPushed?.length || activity.reposTouched?.length || 0} repos`,
     });
   }
 
@@ -73,43 +79,87 @@ export function buildEvidence(analyzedRepos, profileScores, activity = null) {
  * Narrative observations with kind + evidence bullets.
  * kind: observed | inferred | uncertain
  */
-export function buildObservations(analyzedRepos, profileScores, languageSummary = [], activity = null) {
+export function buildObservations(
+  analyzedRepos,
+  profileFocus,
+  languageSummary = [],
+  activity = null,
+  activityImpression = null
+) {
   const n = analyzedRepos.length || 1;
-  const withTests = analyzedRepos.filter((a) => a.signals?.hasTests);
-  const withCi = analyzedRepos.filter((a) => a.signals?.hasCi);
-  const active90 = analyzedRepos.filter((a) => daysSince(a.repo.pushedAt) < 90);
-  const oldButAlive = analyzedRepos.filter(
-    (a) => ageYears(a.repo.createdAt) >= 2 && daysSince(a.repo.pushedAt) < 180
-  );
-  const noTests = analyzedRepos.filter((a) => !a.signals?.hasTests);
   const langs = (languageSummary || []).map((l) => l.name);
   const observations = [];
-  const thinNames = repoNames(noTests, 2);
-  const testNames = repoNames(withTests, 2);
+  const topFocus = profileFocus?.top || [];
 
-  // Activity / recent commits — lead with what makes THIS person distinct
-  if (activity?.commitApprox >= 12 || activity?.label === "hot" || activity?.label === "active") {
-    const top = (activity.reposTouched || []).slice(0, 2).map((r) => r.name);
+  // CS focus — lead with what they build
+  if (topFocus.length >= 1 && topFocus[0].score >= 5) {
+    const primary = topFocus[0];
+    const secondary = topFocus[1];
+    const focusRepos = analyzedRepos
+      .filter((a) => (a.focusScores?.[primary.key] || 0) >= 6)
+      .slice(0, 3);
+    const names = repoNames(focusRepos.length ? focusRepos : analyzedRepos.slice(0, 2), 2);
+
+    observations.push({
+      id: "focus-primary",
+      icon: primary.icon || "🎯",
+      title:
+        secondary && secondary.score >= 5
+          ? `Builds in ${primary.label} with a ${secondary.label} streak`
+          : `${primary.label} is the clearest through-line`,
+      kind: "inferred",
+      body:
+        names.length > 0
+          ? `Public repos like ${names.join(" & ")} reinforce a ${primary.label.toLowerCase()} identity${
+              secondary ? `, with ${secondary.label.toLowerCase()} showing up too` : ""
+            }.`
+          : `Across the sample, ${primary.label.toLowerCase()} signals dominate.`,
+      evidence: [
+        `${primary.label} ${primary.score}/10`,
+        secondary ? `${secondary.label} ${secondary.score}/10` : null,
+        ...focusRepos.slice(0, 2).map((a) => a.repo.name),
+      ].filter(Boolean),
+      dim: primary.key,
+      score: primary.score,
+    });
+  }
+
+  // Activity + public vs private read
+  if (activityImpression?.possiblyPrivate) {
+    observations.push({
+      id: "activity-private-hint",
+      icon: "🌙",
+      title: "Busy on the graph, quiet in public repos",
+      kind: "inferred",
+      body: activityImpression.impression,
+      evidence: [
+        activityImpression.yearCount != null ? `~${activityImpression.yearCount} year contributions` : null,
+        activityImpression.includesPrivate ? "Graph may count private work" : null,
+        activity?.commitApprox ? `≈${activity.commitApprox} public commits in events` : "Few public push events",
+      ].filter(Boolean),
+      dim: "activity",
+      score: null,
+    });
+  } else if (activity?.commitApprox >= 12 || activity?.pushCount >= 8 || activity?.label === "hot" || activity?.label === "active") {
+    const top = (activity.reposPushed || activity.reposTouched || []).slice(0, 2).map((r) => r.name);
+    const pushN = activity.pushCount ?? activity.pushEvents ?? 0;
     observations.push({
       id: "activity-hot",
       icon: "🚀",
       title:
-        activity.commitApprox > 0
-          ? `≈${activity.commitApprox} recent public commits${top.length ? ` in ${top.join(" & ")}` : ""}`
-          : `${activity.active30 || active90.length} repos moved in the last month`,
+        pushN > 0
+          ? `${pushN} recent public push${pushN === 1 ? "" : "es"}${top.length ? ` in ${top.join(" & ")}` : ""}`
+          : activity.commitApprox > 0
+            ? `≈${activity.commitApprox} recent public commits${top.length ? ` in ${top.join(" & ")}` : ""}`
+            : `${activity.active30 || 0} repos moved in the last month`,
       kind: "observed",
-      body:
-        activity.sampleNote ||
-        `Public push events show ${activityVibe(activity)}. Activity score ${profileScores.activity}/10.`,
+      body: activityImpression?.impression || activity.sampleNote || `Public push events show ${activityVibe(activity)}.`,
       evidence: [
         activity.commitApprox > 0 ? `≈${activity.commitApprox} commits in public events` : null,
-        activity.daysSinceLastPushEvent != null
-          ? `Last public push event ~${activity.daysSinceLastPushEvent}d ago`
-          : null,
-        `Activity ${profileScores.activity}/10`,
+        ...(activity.reposTouched || []).slice(0, 3).map((r) => `${r.name}: ~${r.commits || "?"} commits`),
       ].filter(Boolean),
       dim: "activity",
-      score: profileScores.activity,
+      score: null,
     });
   } else if (activity?.label === "quiet" || activity?.label === "dormant") {
     observations.push({
@@ -117,98 +167,17 @@ export function buildObservations(analyzedRepos, profileScores, languageSummary 
       icon: "🚀",
       title:
         activity.newestRepoName && activity.newestPushDays != null
-          ? `Public work has been quiet (last sample push ~${activity.newestPushDays}d ago on ${activity.newestRepoName})`
+          ? `Public work quiet. Last push ~${activity.newestPushDays}d ago on ${activity.newestRepoName}`
           : "Public commits have been sparse lately",
       kind: "observed",
-      body: "That can mean finished projects or private work elsewhere. The public sample just isn't moving much right now.",
+      body:
+        activityImpression?.impression ||
+        "That can mean finished projects or private work elsewhere.",
       evidence: analyzedRepos
         .slice(0, 3)
         .map((a) => `${a.repo.name}: ~${Math.round(daysSince(a.repo.pushedAt))}d since push`),
       dim: "activity",
-      score: profileScores.activity,
-    });
-  }
-
-  // Testing — person/repo specific titles (avoid generic "Limited testing…" copy)
-  if (withTests.length / n >= 0.6) {
-    observations.push({
-      id: "testing-strong",
-      icon: "🧪",
-      title:
-        testNames.length > 0
-          ? `Testing shows up clearly in ${testNames.join(" & ")}${withTests.length > 2 ? ` (+${withTests.length - 2} more)` : ""}`
-          : "Testing is a clear strength",
-      kind: "observed",
-      body: `${withTests.length} of the ${n} analyzed repositories contain automated tests${
-        withCi.length ? `, and ${withCi.length} wire up CI` : ""
-      }. Larger projects in the set appear to prioritize regression protection.`,
-      evidence: [
-        `Tests in ${withTests.map((a) => a.repo.name).slice(0, 3).join(", ")}`,
-        withCi.length ? `CI in ${withCi.length}/${n}` : null,
-        `Testing score ${profileScores.testing}/10`,
-      ].filter(Boolean),
-      dim: "testing",
-      score: profileScores.testing,
-    });
-  } else if (noTests.length / n >= 0.6) {
-    let testTitle;
-    if (thinNames.length === 0) {
-      testTitle = `Automated tests are hard to find in this ${langs[0] || "public"} sample`;
-    } else if (noTests.length === n && n <= 2) {
-      testTitle = `${thinNames.join(" & ")} show no obvious test suite`;
-    } else if (noTests.length === n) {
-      testTitle = `${thinNames.join(" & ")} and ${n - thinNames.length} other sampled repos show no obvious test suite`;
-    } else {
-      testTitle = `${thinNames.join(" & ")} lack an obvious test suite (${noTests.length}/${n} sampled)`;
-    }
-    observations.push({
-      id: "testing-thin",
-      icon: "🧪",
-      title: testTitle,
-      kind: "observed",
-      body: `${noTests.length}/${n} analyzed repos show no obvious test footprint at the root. That doesn't mean "bad engineer." It means public automation is sparse${
-        langs[0] ? ` in this ${langs[0]}-heavy sample` : ""
-      }.`,
-      evidence: noTests.slice(0, 3).map((a) => `No test signals in ${a.repo.name}`),
-      dim: "testing",
-      score: profileScores.testing,
-    });
-  }
-
-  // Maintenance
-  if (active90.length >= 2 || (oldButAlive.length >= 1 && active90.length >= 1)) {
-    const careNames = repoNames(oldButAlive.length ? oldButAlive : active90, 2);
-    observations.push({
-      id: "maintenance-strong",
-      icon: "🔄",
-      title:
-        careNames.length > 0
-          ? `Still tending ${careNames.join(" & ")}${oldButAlive.length ? " years on" : ""}`
-          : "This developer likes to maintain things",
-      kind: "inferred",
-      body:
-        oldButAlive.length > 0
-          ? `${active90.length} repositories received meaningful pushes in the last 90 days, including older work that is still getting care.`
-          : `${active90.length} repositories received meaningful pushes in the last 90 days.`,
-      evidence: active90.slice(0, 3).map((a) => {
-        const d = Math.round(daysSince(a.repo.pushedAt));
-        return `${a.repo.name} pushed ~${d}d ago`;
-      }),
-      dim: "maintenance",
-      score: profileScores.maintenance,
-    });
-  } else if ((profileScores.maintenance || 0) <= 4.5 && !observations.some((o) => o.id === "activity-quiet")) {
-    observations.push({
-      id: "maintenance-quiet",
-      icon: "🔄",
-      title: "Public maintenance looks quiet lately",
-      kind: "observed",
-      body: "Most of the sample hasn't moved recently. Older projects may simply be finished rather than abandoned in disgrace.",
-      evidence: analyzedRepos
-        .slice(0, 3)
-        .map((a) => `${a.repo.name}: ~${Math.round(daysSince(a.repo.pushedAt))}d since push`),
-      dim: "maintenance",
-      score: profileScores.maintenance,
+      score: null,
     });
   }
 
@@ -220,10 +189,10 @@ export function buildObservations(analyzedRepos, profileScores, languageSummary 
       icon: "🧩",
       title: `${langs[0]} + ${langs[1]} keep showing up`,
       kind: "inferred",
-      body: `Their public work repeatedly surfaces ${top}, suggesting a real preference rather than random language hopping.`,
+      body: `Their public work repeatedly surfaces ${top}, which usually means depth in that stack rather than random hopping.`,
       evidence: (languageSummary || []).slice(0, 3).map((l) => `${l.name} ~${l.percent}% of sample weight`),
-      dim: "architecture",
-      score: profileScores.architecture,
+      dim: "stack",
+      score: null,
     });
   } else if (langs[0]) {
     observations.push({
@@ -231,53 +200,42 @@ export function buildObservations(analyzedRepos, profileScores, languageSummary 
       icon: "🧩",
       title: `${langs[0]} looks like home base`,
       kind: "observed",
-      body: `Most of the analyzed weight sits in ${langs[0]}. That usually means depth over résumé padding.`,
-      evidence: [`Primary language signal: ${langs[0]}`],
-      dim: "architecture",
-      score: profileScores.architecture,
+      body: `Most analyzed weight sits in ${langs[0]}.`,
+      evidence: [`Primary language: ${langs[0]}`],
+      dim: "stack",
+      score: null,
     });
   }
 
-  // Docs
-  if ((profileScores.documentation || 0) >= 7.5) {
+  // Standout repo by stars + focus
+  const byStars = [...analyzedRepos].sort((a, b) => (b.repo.stargazers || 0) - (a.repo.stargazers || 0));
+  const flagship = byStars.find((a) => (a.repo.stargazers || 0) >= 15);
+  if (flagship) {
+    const topKey = Object.entries(flagship.focusScores || {}).sort((a, b) => b[1] - a[1])[0];
     observations.push({
-      id: "docs-strong",
-      icon: "📚",
-      title: "Documentation is taken seriously",
+      id: "flagship-repo",
+      icon: "⭐",
+      title: `${flagship.repo.name} is the gravity well (${flagship.repo.stargazers}★)`,
       kind: "observed",
-      body: "READMEs and docs signals show up often enough that outsiders can actually orient themselves.",
+      body: topKey
+        ? `Reads as ${focusAreaLabel(topKey[0]).toLowerCase()} work. ${repoOneLiner(flagship.repo, flagship.pokemon, flagship.signals)}`
+        : repoOneLiner(flagship.repo, flagship.pokemon, flagship.signals),
       evidence: [
-        `Documentation score ${profileScores.documentation}/10`,
-        `${analyzedRepos.filter((a) => a.signals?.hasReadme).length}/${n} with README`,
+        `${flagship.repo.stargazers} stars`,
+        `Last push ~${Math.round(daysSince(flagship.repo.pushedAt))}d ago`,
       ],
-      dim: "documentation",
-      score: profileScores.documentation,
-    });
-  } else if ((profileScores.documentation || 0) <= 5) {
-    const thinDoc = analyzedRepos.filter((a) => !a.signals?.hasReadme).slice(0, 2);
-    observations.push({
-      id: "docs-thin",
-      icon: "📚",
-      title:
-        thinDoc.length > 0
-          ? `Docs lag on ${repoNames(thinDoc).join(" & ")}`
-          : "Docs look thinner than the code signals",
-      kind: "observed",
-      body: "Public documentation lags the rest of the profile. Fine for private hacks. Rough if strangers are meant to use the work.",
-      evidence: [`Documentation score ${profileScores.documentation}/10`],
-      dim: "documentation",
-      score: profileScores.documentation,
+      dim: topKey?.[0] || null,
+      score: topKey?.[1] || null,
     });
   }
 
-  // Uncertain catch-all if thin
   if (observations.length < 2) {
     observations.push({
       id: "uncertain-thin",
       icon: "❔",
-      title: "Public sample is a bit thin to overclaim",
+      title: "Public sample is thin. Read lightly",
       kind: "uncertain",
-      body: "There's enough to sketch a silhouette, not enough to write a biography. Treat the stronger signals as more trustworthy than the soft ones.",
+      body: "Enough to sketch a silhouette, not enough for a biography. Lean on named repos and recent pushes over vibes.",
       evidence: [`Only ${n} repos in the analysis set`],
       dim: null,
       score: null,
@@ -291,23 +249,18 @@ export function buildObservations(analyzedRepos, profileScores, languageSummary 
  * 1–3 surprising cross-repo patterns. Empty array if nothing credible.
  * Never invent filler.
  */
-export function buildSurprises(analyzedRepos, profileScores, languageSummary = []) {
+export function buildSurprises(analyzedRepos, profileFocus, languageSummary = []) {
   const n = analyzedRepos.length;
   if (n < 2) return [];
 
   const surprises = [];
-  const withTests = analyzedRepos.filter((a) => a.signals?.hasTests);
-  const withCi = analyzedRepos.filter((a) => a.signals?.hasCi);
   const oldAlive = analyzedRepos.filter(
     (a) => ageYears(a.repo.createdAt) >= 3 && daysSince(a.repo.pushedAt) < 120
   );
   const bigQuiet = analyzedRepos.filter(
     (a) => (a.repo.stargazers || 0) >= 80 && daysSince(a.repo.pushedAt) > 400
   );
-  const ciNoTests = analyzedRepos.filter((a) => a.signals?.hasCi && !a.signals?.hasTests);
-  const testsNoCi = analyzedRepos.filter((a) => a.signals?.hasTests && !a.signals?.hasCi);
 
-  // Sorted by age of last push — newest vs oldest language
   const byPush = [...analyzedRepos].sort(
     (a, b) => new Date(b.repo.pushedAt) - new Date(a.repo.pushedAt)
   );
@@ -316,30 +269,26 @@ export function buildSurprises(analyzedRepos, profileScores, languageSummary = [
   const recentOnly = [...recentLangs].filter((l) => !olderLangs.has(l));
   const olderOnly = [...olderLangs].filter((l) => !recentLangs.has(l));
 
+  const topFocus = profileFocus?.top || [];
+  if (topFocus.length >= 2 && topFocus[0].score >= 6 && topFocus[1].score >= 5) {
+    surprises.push({
+      id: "dual-focus",
+      icon: "🔀",
+      title: `Spans ${topFocus[0].label} and ${topFocus[1].label}`,
+      kind: "inferred",
+      body: `Not a single-lane builder. Public repos show real weight in both areas.`,
+      evidence: topFocus.slice(0, 2).map((f) => `${f.label} ${f.score}/10`),
+    });
+  }
+
   if (oldAlive.length >= 2) {
     surprises.push({
       id: "long-care",
       icon: "⏳",
       title: "They keep old projects alive",
       kind: "observed",
-      body: `${oldAlive.length} repositories are 3+ years old and still saw pushes in the last ~4 months. Longevity with care, not just archive dust.`,
+      body: `${oldAlive.length} repositories are 3+ years old and still saw pushes in the last ~4 months.`,
       evidence: oldAlive.slice(0, 3).map((a) => `${a.repo.name} (~${ageYears(a.repo.createdAt).toFixed(1)}y)`),
-    });
-  }
-
-  if (withTests.length >= 3 && withTests.length / n >= 0.75 && (profileScores.testing || 0) >= 8) {
-    const names = withTests.slice(0, 3).map((a) => a.repo.name);
-    surprises.push({
-      id: "test-habit",
-      icon: "🧪",
-      title: "Testing shows up as a habit, not a one-off",
-      kind: "inferred",
-      body: `Automated tests appear across ${withTests.length}/${n} analyzed repos (${names.join(", ")}${
-        withTests.length > 3 ? "…" : ""
-      }). That consistency is rarer than a single well-tested showcase.`,
-      evidence: [`Tests in ${withTests.length}/${n}`, withCi.length ? `CI in ${withCi.length}/${n}` : null].filter(
-        Boolean
-      ),
     });
   }
 
@@ -350,9 +299,7 @@ export function buildSurprises(analyzedRepos, profileScores, languageSummary = [
       icon: "🏠",
       title: `${langs[0]} is a real home base`,
       kind: "observed",
-      body: `About ${languageSummary[0].percent}% of analyzed weight sits in ${langs[0]}, with ${langs
-        .slice(1, 3)
-        .join(" / ")} around the edges. Depth over résumé padding.`,
+      body: `About ${languageSummary[0].percent}% of analyzed weight sits in ${langs[0]}.`,
       evidence: languageSummary.slice(0, 3).map((l) => `${l.name} ~${l.percent}%`),
     });
   }
@@ -363,9 +310,9 @@ export function buildSurprises(analyzedRepos, profileScores, languageSummary = [
       icon: "🔀",
       title: "Recent work may be shifting stacks",
       kind: "inferred",
-      body: `Newer pushes surface ${recentOnly.slice(0, 2).join(" / ")}, while older work in the sample leans ${olderOnly
+      body: `Newer pushes surface ${recentOnly.slice(0, 2).join(" / ")}, while older work leans ${olderOnly
         .slice(0, 2)
-        .join(" / ")}. Treat this as a hint from the sample, not a career biography.`,
+        .join(" / ")}.`,
       evidence: [
         `Recent langs: ${[...recentLangs].join(", ") || "-"}`,
         `Older langs: ${[...olderLangs].join(", ") || "-"}`,
@@ -380,58 +327,11 @@ export function buildSurprises(analyzedRepos, profileScores, languageSummary = [
       icon: "⭐",
       title: "A high-gravity repo has gone quiet",
       kind: "observed",
-      body: `${r.name} still carries ${r.stargazers}★ but hasn't moved in a long while. It may simply be finished. It still shapes how the profile reads.`,
+      body: `${r.name} still carries ${r.stargazers}★ but hasn't moved in a long while. May simply be finished.`,
       evidence: [`${r.name}: ${r.stargazers}★`, `~${Math.round(daysSince(r.pushedAt))}d since push`],
     });
   }
 
-  if (ciNoTests.length >= 2) {
-    surprises.push({
-      id: "ci-without-tests",
-      icon: "⚙️",
-      title: "CI without an obvious test suite",
-      kind: "observed",
-      body: `${ciNoTests.length} repos wire CI but don't show a clear test footprint at the root. Pipelines may be lint/build-only, or tests live somewhere we didn't see.`,
-      evidence: ciNoTests.slice(0, 3).map((a) => a.repo.name),
-    });
-  } else if (testsNoCi.length >= 2 && withTests.length >= 2) {
-    surprises.push({
-      id: "tests-without-ci",
-      icon: "📎",
-      title: "Tests exist without public CI",
-      kind: "observed",
-      body: `${testsNoCi.length} repos show tests but no obvious CI config. Local discipline without the public automation badge.`,
-      evidence: testsNoCi.slice(0, 3).map((a) => a.repo.name),
-    });
-  }
-
-  const pokeCounts = {};
-  for (const a of analyzedRepos) {
-    const name = a.pokemon?.name;
-    if (name) pokeCounts[name] = (pokeCounts[name] || 0) + 1;
-  }
-  const pokeKinds = Object.keys(pokeCounts);
-  if (pokeKinds.length === 1 && n >= 4) {
-    surprises.push({
-      id: "mono-poke",
-      icon: "🎯",
-      title: `Almost everything reads as ${pokeKinds[0]}`,
-      kind: "inferred",
-      body: `All ${n} analyzed repos mapped to ${pokeKinds[0]}. Unusually consistent public project shape.`,
-      evidence: [`${pokeKinds[0]} × ${n}`],
-    });
-  } else if (pokeKinds.length >= 5 && n >= 6) {
-    surprises.push({
-      id: "wide-poke",
-      icon: "🌈",
-      title: "Unusually wide repository personalities",
-      kind: "inferred",
-      body: `${pokeKinds.length} different Pokémon across ${n} repos. The public work spans quite different shapes.`,
-      evidence: pokeKinds.slice(0, 5),
-    });
-  }
-
-  // Prefer distinctive ones; drop if we only have generic home-base
   return surprises.slice(0, 3);
 }
 
@@ -439,30 +339,36 @@ export function buildSurprises(analyzedRepos, profileScores, languageSummary = [
  * At-a-glance headline + strongest dims + one-liner.
  * Answers: "What kind of engineer is this?"
  */
-export function buildGlance(user, profileScores, observations, summary, languageSummary = [], activity = null) {
-  const ranked = [
-    ["testing", "Testing", "🧪"],
-    ["architecture", "Architecture", "🏗"],
-    ["maintenance", "Maintenance", "🔄"],
-    ["documentation", "Docs", "📚"],
-    ["complexity", "Complexity", "🛠"],
-    ["activity", "Activity", "🚀"],
-  ]
-    .map(([key, label, icon]) => ({ key, label, icon, score: profileScores[key] }))
-    .filter((d) => d.score != null)
-    .sort((a, b) => b.score - a.score);
+export function buildGlance(
+  user,
+  profileFocus,
+  observations,
+  summary,
+  languageSummary = [],
+  activity = null,
+  activityImpression = null,
+  contributionPulse = null
+) {
+  const ranked = (profileFocus?.top || []).map((d) => ({
+    key: d.key,
+    label: d.label,
+    icon: d.icon,
+    score: d.score,
+  }));
 
-  // Match the Day-2 mock: show top strengths (prefer the four classic dims when close)
-  const classic = ranked.filter((d) =>
-    ["testing", "architecture", "maintenance", "documentation"].includes(d.key)
-  );
-  const strongest = (classic.length >= 3 ? classic : ranked).slice(0, 4);
+  const strongest = ranked.slice(0, 4);
 
-  const derived = deriveHeadline(user, profileScores, observations, languageSummary, activity);
+  const derived = deriveBuilderHeadline(user, profileFocus, languageSummary, activity, {
+    ...contributionPulse,
+    possiblyPrivate: activityImpression?.possiblyPrivate,
+  });
   const rawHeadline = summary?.glanceHeadline || derived;
   const headline = isGenericHeadline(rawHeadline) ? derived : rawHeadline;
 
-  const derivedOne = deriveOneLiner(profileScores, observations, activity, languageSummary);
+  const derivedOne = deriveBuilderOneLiner(profileFocus, activity, {
+    ...contributionPulse,
+    possiblyPrivate: activityImpression?.possiblyPrivate,
+  });
   const rawOne = summary?.oneLiner || derivedOne;
   const oneLiner =
     (isGenericOneLiner(rawOne) ? derivedOne : rawOne) ||
@@ -485,104 +391,23 @@ function isGenericHeadline(h) {
 function isGenericOneLiner(h) {
   const s = String(h || "").trim();
   if (!s) return true;
-  return /limited testing infrastructure is visible/i.test(s);
-}
-
-function deriveHeadline(user, scores, observations, languageSummary = [], activity = null) {
-  const langs = (languageSummary || []).map((l) => l.name).filter(Boolean);
-  const traits = [];
-
-  if ((scores.testing || 0) >= 8) traits.push("test-oriented");
-  if ((scores.maintenance || 0) >= 8) traits.push("maintenance-minded");
-  if ((scores.architecture || 0) >= 8) traits.push("structure-conscious");
-  if ((scores.complexity || 0) >= 8) traits.push("systems-depth");
-  if ((scores.documentation || 0) >= 8) traits.push("docs-aware");
-
-  let stack = "";
-  if (langs.length >= 2) stack = `${langs[0]}/${langs[1]}`;
-  else if (langs[0]) stack = langs[0];
-
-  const pace = activityAdjective(activity);
-  const who = user?.name?.trim() || (user?.login ? `@${user.login}` : null);
-
-  // Prefer concrete, person-specific archetypes over "Public GitHub engineer"
-  if (traits.length && stack) {
-    return `${pace} ${traits[0]} ${stack} engineer`;
-  }
-  if (stack && activity?.label === "hot") {
-    return `${stack} builder shipping often`;
-  }
-  if (stack && (activity?.label === "quiet" || activity?.label === "dormant")) {
-    return `${stack}-focused engineer, quieter lately`;
-  }
-  if (traits.length >= 2) {
-    return `${capitalize(traits[0])}, ${traits[1]} engineer`;
-  }
-  if (traits.length === 1 && stack) {
-    return `${capitalize(traits[0])} ${stack} engineer`;
-  }
-  if (traits.length === 1) {
-    return `${pace} ${traits[0]} engineer`;
-  }
-  if (stack) {
-    return `${pace} ${stack}-focused engineer`;
-  }
-  if (activity?.commitApprox > 0) {
-    return `${pace} open-source contributor (≈${activity.commitApprox} recent commits)`;
-  }
-  // Prefer a distinctive observation title over a generic bio first-line
-  const obsTitle = observations?.find((o) => o.id !== "uncertain-thin")?.title;
-  if (obsTitle && obsTitle.length < 72) return obsTitle;
-  if (who) return `${who}'s public engineering silhouette`;
-  return "Open-source engineer with a thin public sample";
-}
-
-function deriveOneLiner(scores, observations, activity = null, languageSummary = []) {
-  const langs = (languageSummary || []).map((l) => l.name).filter(Boolean);
-  const traits = [];
-  if ((scores.testing || 0) >= 7.5) traits.push("test-oriented");
-  if ((scores.maintenance || 0) >= 7.5) traits.push("highly iterative");
-  if ((scores.architecture || 0) >= 7.5) traits.push("structure-conscious");
-
-  const vibe = activityVibe(activity);
-  if (traits.length >= 2) {
-    return `${capitalize(traits[0])} and ${traits[1]}, ${vibe}.`;
-  }
-  if (traits.length === 1 && langs[0]) {
-    return `${capitalize(traits[0])} ${langs[0]} work, ${vibe}.`;
-  }
-  if (traits.length === 1) return `Consistent and ${traits[0]}, ${vibe}.`;
-  if (activity?.commitApprox >= 12) {
-    return `≈${activity.commitApprox} recent public commits, ${vibe}.`;
-  }
-  if (langs[0]) return `${langs[0]}-heavy public sample, ${vibe}.`;
-  if (observations[0]?.title) return observations[0].title;
-  return "";
-}
-
-function capitalize(s) {
-  return String(s || "").replace(/^\w/, (c) => c.toUpperCase());
+  return (
+    /limited testing infrastructure is visible/i.test(s) ||
+    /test-oriented/i.test(s) ||
+    /maintenance-minded/i.test(s)
+  );
 }
 
 /** Per-repo drill-down payload. */
 export function buildRepoDrilldown(item) {
-  const { repo, scores, signals, pokemon } = item;
+  const { repo, signals, pokemon, focusScores, oneLiner } = item;
   const years = ageYears(repo.createdAt);
   const days = Math.round(daysSince(repo.pushedAt));
 
-  const checks = [
-    { ok: Boolean(signals.hasCi), text: "CI configured" },
-    { ok: Boolean(signals.hasTests), text: "Automated tests" },
-    { ok: days < 180, text: "Active development" },
-    { ok: Boolean(signals.hasReadme || signals.hasDocs), text: "Documentation" },
-    { ok: Boolean(signals.hasLicenseFile || repo.license), text: "License present" },
-    {
-      ok: (signals.rootFiles || []).some((f) =>
-        /package-lock|yarn.lock|pnpm-lock|go.sum|Cargo.lock|Gemfile.lock|poetry.lock/i.test(f)
-      ),
-      text: "Lockfile / dependency pin",
-    },
-  ];
+  const topFocus = Object.entries(focusScores || {})
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([k, v]) => `${focusAreaLabel(k)} ${v}/10`);
 
   const interesting = [
     years >= 1 ? `${years.toFixed(1)} years old` : "Younger than a year",
@@ -590,27 +415,27 @@ export function buildRepoDrilldown(item) {
     repo.language ? `${repo.language}-heavy` : null,
     (repo.stargazers || 0) >= 20 ? `${repo.stargazers} stars` : null,
     (repo.topics || []).length ? `Topics: ${repo.topics.slice(0, 4).join(", ")}` : null,
+    signals.recentCommitApprox ? `≈${signals.recentCommitApprox} recent public commits` : null,
   ].filter(Boolean);
 
-  const roleGuess = pokemon.tags?.includes("Frontend")
-    ? "Frontend"
-    : pokemon.tags?.includes("Infra")
-      ? "Infrastructure"
-      : pokemon.tags?.includes("Security")
-        ? "Security"
+  const roleGuess =
+    topFocus[0]?.split(" ")[0] ||
+    (pokemon.tags?.includes("Frontend")
+      ? "Frontend"
+      : pokemon.tags?.includes("Infra")
+        ? "Infrastructure"
         : pokemon.tags?.includes("ML")
-          ? "ML / research"
-          : repo.language
-            ? `${repo.language} · project`
-            : "General project";
+          ? "AI / ML"
+          : repo.language || "Project");
 
   return {
     roleGuess,
-    checks,
+    checks: [],
     interesting,
-    whyTitle: `Why ${pokemon.name}?`,
-    whyBody: pokemon.why || pokemon.signal,
+    whyTitle: "What this repo is",
+    whyBody: oneLiner || repoOneLiner(repo, pokemon, signals),
     personality: pokemon.personality || pokemon.blurb,
+    focusLines: topFocus,
   };
 }
 

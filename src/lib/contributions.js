@@ -38,13 +38,40 @@ export function parseContributionPulse(html, now = Date.now()) {
     }
   }
 
+  const weeks = buildWeeklyLevels(found, now, 12);
+
   if (yearCount == null && found.size === 0) return null;
   return {
     yearCount,
     includesPrivate,
     recentActiveDays,
     recentLevelSum,
+    weeks,
   };
+}
+
+/** Last N weeks of contribution intensity (0–28 scale per week from day levels 0–4). */
+export function buildWeeklyLevels(dayMap, now = Date.now(), weekCount = 12) {
+  const weeks = [];
+  const msWeek = 7 * 24 * 60 * 60 * 1000;
+  const start = now - weekCount * msWeek;
+
+  for (let w = 0; w < weekCount; w++) {
+    const weekStart = start + w * msWeek;
+    const weekEnd = weekStart + msWeek;
+    let levelSum = 0;
+    let activeDays = 0;
+    for (const [date, level] of dayMap) {
+      const t = new Date(`${date}T12:00:00Z`).getTime();
+      if (Number.isNaN(t) || t < weekStart || t >= weekEnd) continue;
+      if (level > 0) {
+        activeDays += 1;
+        levelSum += level;
+      }
+    }
+    weeks.push({ weekStart, levelSum, activeDays });
+  }
+  return weeks;
 }
 
 export async function fetchContributionPulse(username) {

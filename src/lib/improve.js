@@ -1,9 +1,63 @@
 /**
- * Actionable public-profile improvements for the logged-in user's own profile.
- * Never invents private-repo advice. Soft, practical, evidence-backed.
+ * Public-presence coaching for your own profile.
+ * Recruiter lens: how strangers read you, how to present yourself, what to fix first.
  */
 
 import { openaiChatJson } from "./openai-request.js";
+import { focusAreaLabel, focusAreaMeta, focusPillars } from "./focus.js";
+
+const META_PILLARS = {
+  presence: { key: "presence", label: "Public presence", icon: "📣" },
+  portfolio: { key: "portfolio", label: "Portfolio", icon: "✨" },
+};
+
+function pillar(...keys) {
+  const out = [];
+  const seen = new Set();
+  for (const key of keys) {
+    const meta =
+      key === "presence" || key === "portfolio"
+        ? META_PILLARS[key]
+        : focusAreaMeta(key);
+    if (!meta || seen.has(meta.key)) continue;
+    seen.add(meta.key);
+    out.push(meta);
+  }
+  return out;
+}
+
+function topFocusKeys(focusScores, limit = 2) {
+  return Object.entries(focusScores || {})
+    .sort((a, b) => b[1] - a[1])
+    .filter(([, score]) => score >= 4)
+    .slice(0, limit)
+    .map(([key]) => key);
+}
+
+function inferPillarsFromText(text = "") {
+  const hay = String(text).toLowerCase();
+  const hits = [];
+  if (/llm|transformer|gpt|rag|prompt|langchain/.test(hay)) hits.push("llm");
+  if (/machine-learning|\bml\b|model|inference|pytorch|tensorflow/.test(hay)) hits.push("ai");
+  if (/infra|kubernetes|docker|terraform|deploy/.test(hay)) hits.push("infra");
+  if (/research|notebook|benchmark|arxiv|thesis/.test(hay)) hits.push("research");
+  if (/graphics|shader|webgl|render|visual/.test(hay)) hits.push("graphics");
+  if (/frontend|react|vue|ui\b|component|tailwind/.test(hay)) hits.push("frontend");
+  if (/systems|compiler|distributed|database|grpc|wasm/.test(hay)) hits.push("systems");
+  if (/security|crypto|auth|vuln/.test(hay)) hits.push("security");
+  if (/data|etl|pipeline|analytics|sql/.test(hay)) hits.push("data");
+  if (/mobile|ios|android|flutter|react-native/.test(hay)) hits.push("mobile");
+  if (/profile|readme|portfolio|bio|pin/.test(hay)) hits.push("presence");
+  return focusPillars(hits);
+}
+
+function normalizePillars(raw, fallbackKeys = []) {
+  const keys = Array.isArray(raw)
+    ? raw.map((p) => (typeof p === "string" ? p : p?.key)).filter(Boolean)
+    : [];
+  const fromKeys = pillar(...(keys.length ? keys : fallbackKeys));
+  return fromKeys.length ? fromKeys : pillar(...fallbackKeys);
+}
 
 function daysSince(iso) {
   if (!iso) return 9999;
@@ -14,78 +68,253 @@ function primaryLang(languageSummary = []) {
   return languageSummary[0]?.name || null;
 }
 
-/**
- * @returns {{ actions: Array, starters: Array }}
- */
-export function buildImprovements(payload) {
+function topReposByImpressiveness(repos) {
+  return [...repos].sort((a, b) => {
+    const score = (item) => {
+      const stars = item.repo.stargazers || 0;
+      const days = daysSince(item.repo.pushedAt);
+      const recency = Math.max(0, 1 - days / 400);
+      const focusTop = Math.max(...Object.values(item.focusScores || {}), 0);
+      return Math.log10(stars + 1) * 2.5 + recency * 3 + focusTop * 0.3;
+    };
+    return score(b) - score(a);
+  });
+}
+
+function buildOutsiderRead(payload) {
   const repos = payload?.analyzedRepos || [];
-  const scores = payload?.profileScores || {};
+  const focus = payload?.profileFocus?.top || [];
+  const langs = payload?.languageSummary || [];
+  const activity = payload?.activity || {};
+  const user = payload?.user || {};
+  const ranked = topReposByImpressiveness(repos);
+  const flagship = ranked[0];
+  const noDesc = repos.filter((a) => !a.repo.description || a.repo.description.length < 12);
+  const quiet = repos.filter((a) => daysSince(a.repo.pushedAt) > 180);
+  const parts = [];
+
+  if (focus[0]) {
+    parts.push(
+      `A stranger probably slots you as ${focus[0].label.toLowerCase()}${focus[1] ? ` with ${focus[1].label.toLowerCase()} nearby` : ""}`
+    );
+  } else if (langs[0]) {
+    parts.push(`Reads mostly as a ${langs[0].name} engineer from language weight`);
+  }
+
+  if (flagship) {
+    const stars = flagship.repo.stargazers || 0;
+    parts.push(
+      stars >= 5
+        ? `${flagship.repo.name} is the first repo worth opening (${stars}★)`
+        : `${flagship.repo.name} is likely the flagship by recency and focus`
+    );
+  }
+
+  if (!user.bio || user.bio.length < 20) {
+    parts.push("no bio means GitHub pins and repo names do all the talking");
+  }
+
+  if (noDesc.length >= 2) {
+    parts.push(`${noDesc.length} repos have no useful description, so the grid looks unfinished`);
+  }
+
+  if (quiet.length >= Math.ceil(repos.length / 2) && repos.length >= 3) {
+    parts.push("many repos look dormant, which can read as scatter unless you curate");
+  }
+
+  if (activity.pushCount >= 8) {
+    parts.push("recent public pushes show you are actively shipping");
+  } else if (payload?.activityImpression?.possiblyPrivate) {
+    parts.push("the contribution graph looks busier than public repos, so visitors may miss your current work");
+  }
+
+  if (!parts.length) {
+    return "Public sample is thin. Visitors will need pins, a bio, and one clear flagship to understand you quickly.";
+  }
+
+  return `${parts.join(". ")}.`;
+}
+
+function buildTaglines(payload) {
+  const focus = payload?.profileFocus?.top || [];
+  const langs = payload?.languageSummary || [];
+  const activity = payload?.activity || {};
+  const glance = payload?.glance || {};
+  const primary = focus[0];
+  const secondary = focus[1];
+  const lang = langs[0]?.name;
+  const taglines = [];
+
+  if (primary && lang) {
+    taglines.push({
+      text: `${primary.label} engineer · ${lang}`,
+      why: "Leads with CS focus and home language. Works in a GitHub bio or LinkedIn headline.",
+    });
+  }
+
+  if (primary && secondary) {
+    taglines.push({
+      text: `Building ${primary.label.toLowerCase()} tools · ${secondary.label.toLowerCase()} on the side`,
+      why: "Shows a clear lane plus breadth without sounding like a keyword list.",
+    });
+  }
+
+  if (activity?.pushCount >= 5 && primary) {
+    taglines.push({
+      text: `${primary.label} builder · shipping in public`,
+      why: "Pairs your focus with visible momentum recruiters can verify.",
+    });
+  }
+
+  const headline = glance.headline || payload?.summary?.glanceHeadline;
+  if (headline && headline.length < 90 && !/mixed public signals/i.test(headline)) {
+    taglines.push({
+      text: headline.replace(/\.$/, "").slice(0, 100),
+      why: "Pulled from what your repos already signal. Tweak words until it sounds like you.",
+    });
+  }
+
+  if (lang && primary) {
+    taglines.push({
+      text: `${lang} · ${primary.label.toLowerCase()} · open source`,
+      why: "Short stack cue when you want minimal bio real estate.",
+    });
+  }
+
+  if (!taglines.length) {
+    taglines.push({
+      text: lang ? `${lang} builder · exploring in public` : "Builder · exploring in public",
+      why: "Safe starting point while the public story sharpens.",
+    });
+  }
+
+  const seen = new Set();
+  return taglines
+    .filter((t) => {
+      const key = t.text.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 4);
+}
+
+function buildPresentYourself(payload) {
+  const repos = payload?.analyzedRepos || [];
+  const ranked = topReposByImpressiveness(repos);
+  const pins = ranked.slice(0, 3).map((item) => ({
+    repo: item.repo.name,
+    reason: item.oneLiner || item.repo.description || `${item.repo.language || "Project"} work`,
+    stars: item.repo.stargazers || 0,
+    focus: Object.entries(item.focusScores || {})
+      .sort((a, b) => b[1] - a[1])[0],
+  }));
+
+  const quiet = repos.filter((a) => daysSince(a.repo.pushedAt) > 270);
+  const downplay = quiet.slice(0, 3).map((a) => a.repo.name);
+
+  const focus = payload?.profileFocus?.top?.[0];
+  const lead =
+    focus && pins[0]
+      ? `Lead with ${focus.label.toLowerCase()}: pin ${pins[0].repo} first, then ${pins
+          .slice(1)
+          .map((p) => p.repo)
+          .join(" and ") || "your next best"}.`
+      : pins.length
+        ? `Pin ${pins.map((p) => p.repo).join(", ")} so visitors see your strongest public work first.`
+        : "Pick 3 repos that tell one coherent story and pin them.";
+
+  const voice =
+    payload?.user?.bio && payload.user.bio.length >= 20
+      ? "Your bio exists. Make sure it matches what pins and READMEs actually show."
+      : "Write a bio before anyone opens a repo. One line on what you build beats a blank header.";
+
+  return { lead, voice, pins, downplay };
+}
+
+function buildPresenceActions(payload) {
+  const repos = payload?.analyzedRepos || [];
+  const user = payload?.user || {};
+  const focus = payload?.profileFocus?.top || [];
   const langs = payload?.languageSummary || [];
   const lang = primaryLang(langs);
+  const ranked = topReposByImpressiveness(repos);
+  const flagship = ranked[0];
   const n = repos.length || 1;
-  const login = payload?.user?.login || "you";
-
-  const noTests = repos.filter((a) => !a.signals?.hasTests);
-  const noCi = repos.filter((a) => !a.signals?.hasCi);
-  const noReadme = repos.filter((a) => !a.signals?.hasReadme);
-  const quiet = repos.filter((a) => daysSince(a.repo.pushedAt) > 180);
   const noDesc = repos.filter((a) => !a.repo.description || a.repo.description.length < 12);
-  const starred = [...repos].sort((a, b) => (b.repo.stargazers || 0) - (a.repo.stargazers || 0))[0];
-
+  const quiet = repos.filter((a) => daysSince(a.repo.pushedAt) > 180);
+  const hasProfileReadme = payload?.hasProfileReadme;
+  const activity = payload?.activity || {};
   const actions = [];
 
-  if (noTests.length >= 1) {
-    const target = noTests[0].repo.name;
+  if (!user.bio || user.bio.length < 25) {
+    const sample = buildTaglines(payload)[0]?.text || `${lang || "Software"} builder`;
     actions.push({
-      id: "add-tests",
+      id: "bio-tagline",
       priority: "high",
-      title: "Add a real test suite to one showcase repo",
-      why: `${noTests.length}/${n} analyzed repos show no obvious tests. One well-tested public repo changes how your profile reads.`,
+      title: "Set a one-line bio strangers can quote",
+      why: "Recruiters decide in seconds. Your bio is the only sentence you control before they click a repo.",
       steps: [
-        `Pick ${target} (or your most starred project).`,
-        lang === "TypeScript" || lang === "JavaScript"
-          ? "Add Vitest or Jest with 3-5 meaningful tests for core logic."
-          : lang === "Python"
-            ? "Add pytest with a few tests for the main module."
-            : "Add the idiomatic test runner for your stack.",
-        "Mention the test command in the README.",
+        `Try something like: "${sample}"`,
+        "GitHub → your profile → Edit profile → Bio (160 chars max).",
+        "Match the bio to what you pin. Do not claim a focus your repos do not show.",
       ],
-      evidence: noTests.slice(0, 3).map((a) => `No test signals in ${a.repo.name}`),
+      evidence: [user.bio ? "Bio is very short" : "No bio set"],
     });
   }
 
-  if (noCi.length >= 1) {
+  if (ranked.length >= 2) {
+    const pinNames = ranked.slice(0, 3).map((a) => a.repo.name);
     actions.push({
-      id: "add-ci",
-      priority: noTests.length ? "high" : "medium",
-      title: "Wire GitHub Actions CI on your flagship repo",
-      why: `${noCi.length}/${n} repos lack an obvious CI footprint. Public CI is a strong trust signal.`,
+      id: "pin-story",
+      priority: "high",
+      title: "Pin 3 repos that tell one story",
+      why: "Pins are your portfolio above the fold. Random pins make you look unfocused.",
       steps: [
-        "Add `.github/workflows/ci.yml` that runs install + test (and lint if you have it).",
-        "Keep the workflow green on the default branch.",
-        "Link the badge in the README if you like the polish.",
+        `Pin in this order: ${pinNames.join(" → ")}.`,
+        focus[0]
+          ? `Each pin should reinforce ${focus[0].label.toLowerCase()} or your best ${lang || "stack"} work.`
+          : "Pick repos with descriptions and recent commits, not old experiments.",
+        "Unpin anything you would not want to explain in an interview.",
       ],
-      evidence: noCi.slice(0, 3).map((a) => `No CI signals in ${a.repo.name}`),
+      evidence: pinNames.map((name) => `Candidate pin: ${name}`),
     });
   }
 
-  if (noReadme.length >= 1 || (scores.documentation || 0) < 7) {
+  if (flagship) {
+    const name = flagship.repo.name;
+    const weakOpen = !flagship.repo.description && !flagship.signals?.hasReadme;
     actions.push({
-      id: "readme-pass",
+      id: "flagship-opening",
       priority: "high",
-      title: "Do a README pass on 1-2 public repos",
-      why: "Outsiders decide in seconds. A clear README with problem, setup, and demo beats a vague description.",
+      title: `Make ${name} explain itself in 10 seconds`,
+      why: "Your flagship is where most visitors land. They need problem → approach → demo, not folder spelunking.",
       steps: [
-        noReadme[0]
-          ? `Start with ${noReadme[0].repo.name} (weak or missing README signal).`
-          : `Refresh the README on ${starred?.repo?.name || "your top repo"}.`,
-        "Lead with what it does, who it's for, and how to run it in under a minute.",
-        "Add a short GIF/screenshot if it's UI-facing.",
+        `Open ${name} README. First paragraph: what it does, who it is for, one screenshot or command.`,
+        flagship.oneLiner
+          ? `Start from this angle: "${flagship.oneLiner.slice(0, 120)}"`
+          : "Add a GitHub About description if the README is thin.",
+        "Add 3-5 topics (framework, domain, language) so search and skim both work.",
       ],
       evidence: [
-        noReadme.length ? `README thin in ${noReadme.length}/${n}` : null,
-        `Docs score ${scores.documentation ?? "-"}/10`,
+        weakOpen ? "Weak opening signals on flagship" : `Flagship: ${name}`,
+        flagship.repo.language ? `${flagship.repo.language}` : null,
       ].filter(Boolean),
+    });
+  }
+
+  if (!hasProfileReadme && user.login) {
+    actions.push({
+      id: "profile-readme",
+      priority: "high",
+      title: `Turn ${user.login}/${user.login} into a landing page`,
+      why: "A profile README is the only place to curate your story on GitHub itself.",
+      steps: [
+        `Create repo \`${user.login}\` (same name as your username) with a README.`,
+        "Top: one-line tagline. Middle: 3 pinned repos with one sentence each. Bottom: what you are exploring next.",
+        "Link your best demo, not every repo you have ever touched.",
+      ],
+      evidence: ["No profile README detected"],
     });
   }
 
@@ -93,85 +322,109 @@ export function buildImprovements(payload) {
     actions.push({
       id: "repo-descriptions",
       priority: "medium",
-      title: "Write one-line descriptions on bare repos",
-      why: `${noDesc.length} analyzed repos lack a useful description. The profile grid looks unfinished without them.`,
+      title: "Fill in bare repo descriptions",
+      why: "Empty descriptions make the profile grid look abandoned even when the code is fine.",
       steps: [
-        "GitHub → repo → gear next to About → Description.",
-        "One concrete sentence. No buzzword salad.",
-        "Add 2-4 topics (language, domain, framework).",
+        `Start with: ${noDesc
+          .slice(0, 3)
+          .map((a) => a.repo.name)
+          .join(", ")}.`,
+        "One concrete sentence per repo: what it does, not how you feel about it.",
+        "Add topics that match your focus (e.g. machine-learning, cli, api).",
       ],
-      evidence: noDesc.slice(0, 3).map((a) => a.repo.name),
+      evidence: noDesc.slice(0, 4).map((a) => `${a.repo.name}: no description`),
     });
   }
 
-  if (quiet.length >= 2 || (scores.activity || 0) <= 5.5) {
+  if (payload?.activityImpression?.possiblyPrivate && activity.pushCount < 5) {
     actions.push({
-      id: "revive-or-archive",
+      id: "surface-current-work",
       priority: "medium",
-      title: "Revive one quiet repo or archive finished ones",
-      why: "A profile full of untouched projects reads stale. Touch what still matters; archive what doesn't.",
+      title: "Show one slice of current work in public",
+      why: "Your graph looks active but public repos are quiet. Visitors cannot see private work.",
       steps: [
-        quiet[0]
-          ? `Decide on ${quiet[0].repo.name}: small update, clear README "status", or archive.`
-          : "Pick the quietest public repo you still care about.",
-        "A tiny useful commit (docs, dependency bump, bugfix) beats silence.",
-        "Archive truly abandoned repos so visitors see intent.",
+        flagship
+          ? `Small public update on ${flagship.repo.name}: changelog, WIP branch, or demo notes.`
+          : "Pick one repo and push a visible update this week.",
+        "Even a focused README update signals you are still building.",
+        "Or write a short post/issue describing what you are working on.",
+      ],
+      evidence: [
+        payload.activityImpression.yearCount != null
+          ? `~${payload.activityImpression.yearCount} graph contributions`
+          : "Busy contribution graph",
+        `Only ${activity.pushCount || 0} public pushes in events sample`,
+      ],
+    });
+  }
+
+  if (quiet.length >= 2) {
+    actions.push({
+      id: "curate-dormant",
+      priority: "medium",
+      title: "Archive or label finished repos",
+      why: "A wall of quiet projects reads as noise. Curating says you know what still matters.",
+      steps: [
+        `Review: ${quiet
+          .slice(0, 3)
+          .map((a) => a.repo.name)
+          .join(", ")}.`,
+        "Archive if done. Or add a README line: 'Finished / superseded by X'.",
+        "Keep the public timeline focused on work you would still discuss.",
       ],
       evidence: quiet.slice(0, 3).map((a) => `${a.repo.name} (~${Math.round(daysSince(a.repo.pushedAt))}d quiet)`),
     });
   }
 
-  if ((scores.testing || 0) >= 7 && (scores.documentation || 0) < 7) {
+  if (focus.length >= 2) {
     actions.push({
-      id: "docs-match-tests",
-      priority: "medium",
-      title: "Match your docs quality to your testing habits",
-      why: "Your testing signals are stronger than docs. Closing that gap makes the whole silhouette look intentional.",
+      id: "focus-narrative",
+      priority: "low",
+      title: "Make your focus legible across repos",
+      why: `You span ${focus[0].label} and ${focus[1].label}. Without a thread, it looks random.`,
       steps: [
-        "Add CONTRIBUTING.md or a short \"Development\" section.",
-        "Document how to run tests and what \"done\" looks like.",
+        "Use consistent topics across related repos (same 2-3 tags).",
+        "Mention the connection in your bio: 'X by day, Y experiments on the side.'",
+        "Pin the repo that best represents the direction you want next.",
       ],
-      evidence: [`Testing ${scores.testing}/10`, `Docs ${scores.documentation}/10`],
+      evidence: focus.slice(0, 2).map((f) => `${f.label} ${f.score}/10`),
     });
   }
 
-  if (!payload?.user?.bio || payload.user.bio.length < 20) {
+  if (actions.length < 3) {
     actions.push({
-      id: "profile-bio",
+      id: "polish-presence",
       priority: "medium",
-      title: "Tighten your GitHub profile bio + pin 3 repos",
-      why: "The header is the first frame people see. Pins + a concrete bio set context before anyone opens a repo.",
+      title: "Run a 30-minute public presence pass",
+      why: "Even strong profiles benefit from one intentional refresh.",
       steps: [
-        "Bio: what you build + one stack cue (keep it human).",
-        "Pin your best 3 public repos (tests/docs/stars help).",
-        "Optional: a profile README (`username/username`) with a short tour.",
+        "Bio + 3 pins + flagship README opening line.",
+        "Archive one repo you would not discuss in an interview.",
+        "Push one small visible update so 'last active' looks current.",
       ],
-      evidence: [payload?.user?.bio ? "Bio is short" : "No bio set"],
+      evidence: [`${n} repos in sample`],
     });
   }
 
-  // Always give at least a couple actions
-  if (actions.length < 2) {
-    actions.push({
-      id: "polish-flagship",
-      priority: "medium",
-      title: "Polish one flagship repo end-to-end",
-      why: "Even strong profiles benefit from one repo that looks \"finished\" in public.",
-      steps: [
-        `Choose ${starred?.repo?.name || "your favorite owned repo"}.`,
-        "README, license, topics, tests, CI, and a clear status line.",
-        "Cut or archive anything that distracts from that story.",
-      ],
-      evidence: [`Sample of ${n} repos`],
-    });
-  }
-
-  // Sort: high first
   const rank = { high: 0, medium: 1, low: 2 };
   actions.sort((a, b) => (rank[a.priority] ?? 9) - (rank[b.priority] ?? 9));
+  return actions.slice(0, 5);
+}
+
+/**
+ * @returns {{ positioning: Object, actions: Array, starters: Array, forUser: string }}
+ */
+export function buildImprovements(payload) {
+  const login = payload?.user?.login || "you";
+  const positioning = {
+    outsiderRead: buildOutsiderRead(payload),
+    taglines: buildTaglines(payload),
+    present: buildPresentYourself(payload),
+  };
 
   return {
-    actions: actions.slice(0, 5),
+    positioning,
+    actions: buildPresenceActions(payload),
     starters: pickStarters(buildStarterPool(payload), { count: 5, seed: 0 }),
     forUser: login,
   };
@@ -188,163 +441,198 @@ function slug(value, fallback = "app") {
 function starterContext(payload) {
   const repos = payload?.analyzedRepos || [];
   const langs = payload?.languageSummary || [];
-  const scores = payload?.profileScores || {};
+  const focus = payload?.profileFocus?.top || [];
   const login = payload?.user?.login || "you";
-  const lang = primaryLang(langs) || "your main language";
+  const lang = primaryLang(langs) || "your stack";
   const second = langs[1]?.name && langs[1].name !== lang ? langs[1].name : null;
-  const starred = [...repos].sort((a, b) => (b.repo.stargazers || 0) - (a.repo.stargazers || 0))[0];
-  const noTests = repos.filter((a) => !a.signals?.hasTests);
-  const quiet = repos.filter((a) => daysSince(a.repo.pushedAt) > 120);
-  const poke = repos.map((a) => a.pokemon?.name).filter(Boolean);
-  const topics = [...new Set(repos.flatMap((a) => a.repo?.topics || []))];
+  const ranked = topReposByImpressiveness(repos);
+  const flagship = ranked[0];
+  const primaryFocus = focus[0];
+  const secondaryFocus = focus[1];
   const names = repos.map((a) => a.repo?.name).filter(Boolean);
-  const frontend =
-    poke.includes("Sylveon") ||
-    langs.some((l) => /TypeScript|JavaScript|HTML|CSS|Swift|Kotlin/.test(l.name || ""));
+  const topics = [...new Set(repos.flatMap((a) => a.repo?.topics || []))];
+  const activity = payload?.activity || {};
+
   return {
     login,
     lang,
     second,
-    scores,
     repos,
-    flagship: starred?.repo?.name || `${login}-lab`,
-    testTarget: noTests[0]?.repo?.name || names[0] || null,
-    quietRepo: quiet[0]?.repo?.name || null,
-    poke,
+    ranked,
+    flagship: flagship?.repo?.name || `${login}-lab`,
+    flagshipItem: flagship,
+    primaryFocus,
+    secondaryFocus,
+    focus,
     topics,
     names,
-    frontend,
+    activity,
+    possiblyPrivate: payload?.activityImpression?.possiblyPrivate,
   };
 }
 
 export function buildStarterPool(payload) {
   const c = starterContext(payload);
-  const pool = [
-    {
-      id: "starter-tests",
-      emoji: "🧪",
-      title: `test-kit-${slug(c.lang)}`,
-      pitch: `A tiny ${c.lang} playground whose only job is great tests + CI. Copy it into real repos later.`,
-      leapFrom: c.testTarget
-        ? `Extract a pure function from ${c.testTarget} and cover it first.`
-        : "Start from a single module you already wrote.",
-      stack: [c.lang, "CI", "tests"].filter(Boolean),
+  const focusKey = c.primaryFocus?.key || "systems";
+  const focusLabel = c.primaryFocus?.label || "Systems";
+  const pool = [];
+
+  pool.push({
+    id: "starter-profile-readme",
+    emoji: "✨",
+    title: `${c.login}/${c.login}`,
+    pitch: "Your profile README: tagline, 3 best repos, what you want to explore next. The only curated page on GitHub.",
+    leapFrom: c.flagship
+      ? `Feature ${c.flagship} first with a one-sentence hook.`
+      : "Treat your profile as a landing page, not a file dump.",
+    stack: ["profile", "markdown"],
+    pillars: pillar("presence", focusKey),
+  });
+
+  const focusStarters = {
+    ai: {
+      emoji: "🤖",
+      title: `${slug(c.lang)}-inference-demo`,
+      pitch: `A tiny public demo: load a model, run one input, show output. README explains the idea in plain language.`,
+      stack: [c.lang, "ML", "demo"],
     },
-    {
-      id: "starter-readme",
-      emoji: "📚",
-      title: "showcase-readme",
-      pitch: "One polished public repo that teaches a small idea well: crisp README, topics, license, and a 60-second quickstart.",
-      leapFrom: `Lift the best parts of ${c.flagship} into a cleaner hello-world of your craft.`,
-      stack: [c.lang, "docs"].filter(Boolean),
+    llm: {
+      emoji: "🧠",
+      title: `${slug(c.lang)}-llm-sandbox`,
+      pitch: "One focused LLM experiment with a clear README: what prompt, what model, what you learned.",
+      stack: [c.lang, "LLM", "notebook"],
     },
-    {
-      id: "starter-cli",
-      emoji: "⚡",
-      title: "weekend-cli",
-      pitch: `A focused ${c.lang} CLI that does one useful thing. Small surface, high polish, easy to demo.`,
-      leapFrom: "Automate something you already do by hand in this stack.",
-      stack: [c.lang, "cli"],
+    infra: {
+      emoji: "🪨",
+      title: "deploy-one-thing",
+      pitch: "Deploy a single service with a diagram in the README. Shows you can ship, not just script locally.",
+      stack: [c.lang, "infra", "docker"],
     },
-    {
-      id: "starter-profile-readme",
+    research: {
+      emoji: "🔬",
+      title: "repro-notebook",
+      pitch: "One reproducible notebook or benchmark with a short methods section. Makes research taste visible.",
+      stack: [c.lang, "research", "notebook"],
+    },
+    graphics: {
+      emoji: "🎨",
+      title: "one-visual-demo",
+      pitch: "A small graphics or visual demo with a GIF in the README. Let the output sell the repo.",
+      stack: [c.lang, "graphics", "demo"],
+    },
+    frontend: {
       emoji: "✨",
-      title: `${c.login}/${c.login}`,
-      pitch: "A profile README that points visitors to your best 3 repos and what you want to explore next.",
-      leapFrom: "Treat your profile as a landing page, not a file dump.",
-      stack: ["markdown", "profile"],
+      title: "one-screen-ui",
+      pitch: "Single-screen UI that does one thing well. Design and clarity are the whole point.",
+      stack: [c.lang, "frontend", "ui"],
     },
-    {
-      id: "starter-playground",
-      emoji: "🎮",
-      title: `${slug(c.lang)}-playground`,
-      pitch: `A public sandbox for weird little ${c.lang} experiments. One mechanic, lots of personality, shipped in a weekend.`,
-      leapFrom: c.names[0]
-        ? `Steal a tiny idea from ${c.names[0]} and make it playful on purpose.`
-        : "Give yourself a repo where unfinished is the point.",
-      stack: [c.lang, "experimental"],
-    },
-    {
-      id: "starter-action",
+    systems: {
       emoji: "⚙️",
-      title: "tiny-github-action",
-      pitch: "A reusable GitHub Action that encodes one habit you already have (lint, test, changelog, topic check).",
-      leapFrom: "Turn a local ritual into something other people can pin on their repos.",
-      stack: ["GitHub Actions", c.lang],
-    },
-    {
-      id: "starter-api",
-      emoji: "📡",
-      title: `mini-${slug(c.lang)}-api`,
-      pitch: `A tiny ${c.lang} HTTP service with one endpoint, tests, and a README that a stranger can run.`,
-      leapFrom: c.flagship
-        ? `Carve a single useful slice out of ${c.flagship} and give it a door.`
-        : "Expose one function you already trust.",
+      title: `mini-${slug(c.lang)}-service`,
+      pitch: `A small ${c.lang} service with one API, a README strangers can run, and a clear problem statement.`,
       stack: [c.lang, "api"],
     },
-    {
-      id: "starter-dataset",
-      emoji: "🗂️",
-      title: "public-notebook",
-      pitch: "A small, documented dataset or notebook that makes one of your public interests inspectable.",
-      leapFrom: c.topics[0]
-        ? `Start from your "${c.topics[0]}" topic and publish a tiny slice of it.`
-        : "Publish something you already poke at privately.",
-      stack: [c.lang, "docs"],
+    security: {
+      emoji: "🔒",
+      title: "security-lab",
+      pitch: "Document one security concept you understand well. Teaching signal beats a vague hardening repo.",
+      stack: [c.lang, "security"],
     },
-    {
-      id: "starter-bot",
-      emoji: "🤖",
-      title: "weekend-bot",
-      pitch: "A bot or cron job that does one charming, useful thing on a schedule. Public code, obvious personality.",
-      leapFrom: "Automate a nag you already have, then give it a name.",
-      stack: [c.lang, "automation"],
+    data: {
+      emoji: "📊",
+      title: "public-dataset-slice",
+      pitch: "Publish a small, documented dataset or pipeline. Shows data taste without a massive project.",
+      stack: [c.lang, "data"],
     },
-  ];
+    mobile: {
+      emoji: "📱",
+      title: "pocket-prototype",
+      pitch: "One mobile screen or flow, screen-recorded in the README. Proof you ship interfaces.",
+      stack: [c.lang, "mobile"],
+    },
+  };
 
-  if (c.quietRepo || (c.scores.activity || 0) < 7) {
+  const themed = focusStarters[focusKey] || focusStarters.systems;
+  pool.push({
+    id: `starter-focus-${focusKey}`,
+    ...themed,
+    leapFrom: c.flagship
+      ? `Carve the clearest idea from ${c.flagship} and make it standalone.`
+      : `Ship a public hello-world in ${focusLabel.toLowerCase()}.`,
+    pillars: pillar(focusKey),
+  });
+
+  if (c.secondaryFocus) {
     pool.push({
-      id: "starter-revive",
-      emoji: "🔄",
-      title: "revival-log",
-      pitch: "A short public changelog: each week you revive or tidy one older repo and note what changed.",
-      leapFrom: c.quietRepo
-        ? `Start with ${c.quietRepo}. A tiny useful commit beats silence.`
-        : "Turn maintenance into a visible habit.",
-      stack: ["docs", "maintenance"],
+      id: "starter-bridge-focus",
+      emoji: "🌉",
+      title: `${slug(focusKey)}-${slug(c.secondaryFocus.key)}-kit`,
+      pitch: `A small project at the intersection of ${c.primaryFocus.label} and ${c.secondaryFocus.label}.`,
+      leapFrom: "Show how your two lanes connect instead of looking like random repos.",
+      stack: [c.lang, c.primaryFocus.label, c.secondaryFocus.label],
+      pillars: pillar(focusKey, c.secondaryFocus.key),
+    });
+  }
+
+  const flagshipFocus = topFocusKeys(c.flagshipItem?.focusScores, 2);
+  pool.push({
+    id: "starter-showcase",
+    emoji: "⭐",
+    title: `${slug(c.flagship)}-v2`,
+    pitch: "Rebuild your flagship idea with a cleaner README, better name, and one obvious demo path.",
+    leapFrom: c.flagship
+      ? `${c.flagship} has gravity. A polished v2 tells the same story with less friction.`
+      : "Pick your best idea and make it interview-ready.",
+    stack: [c.lang, "showcase"],
+    pillars: pillar(...(flagshipFocus.length ? flagshipFocus : [focusKey]), "presence"),
+  });
+
+  if (c.possiblyPrivate || (c.activity.pushCount || 0) < 5) {
+    pool.push({
+      id: "starter-public-slice",
+      emoji: "📣",
+      title: "public-build-log",
+      pitch: "A repo where you post weekly what you shipped, even if the real work is private. Makes momentum visible.",
+      leapFrom: "Visitors cannot see private work. Give them a honest window.",
+      stack: ["markdown", "log"],
+      pillars: pillar("presence", focusKey),
+    });
+  }
+
+  pool.push({
+    id: "starter-tool",
+    emoji: "⚡",
+    title: `useful-${slug(c.lang)}-cli`,
+    pitch: `A CLI that solves one problem you actually have. Small, named, easy to demo in 60 seconds.`,
+    leapFrom: c.names[0]
+      ? `Automate something ${c.names[0]} almost does.`
+      : "Tools you use yourself read as real, not resume padding.",
+    stack: [c.lang, "cli"],
+    pillars: pillar("systems", focusKey),
+  });
+
+  if (c.topics[0]) {
+    const topicPillars = inferPillarsFromText(c.topics[0]);
+    pool.push({
+      id: "starter-topic",
+      emoji: "🏷️",
+      title: `${slug(c.topics[0])}-explainer`,
+      pitch: `A repo that teaches one idea in your "${c.topics[0]}" lane. README is the product.`,
+      leapFrom: "Teaching signal helps recruiters understand depth fast.",
+      stack: [c.lang, c.topics[0]],
+      pillars: topicPillars.length ? topicPillars : pillar(focusKey, "research"),
     });
   }
 
   if (c.second) {
     pool.push({
-      id: "starter-bridge",
-      emoji: "🌉",
-      title: `${slug(c.lang)}-${slug(c.second)}-bridge`,
-      pitch: `A small tool that connects ${c.lang} and ${c.second}. Cross-stack utilities read as depth, not noise.`,
-      leapFrom: `Reuse patterns you already use in both ecosystems.`,
+      id: "starter-bridge-lang",
+      emoji: "🔀",
+      title: `${slug(c.lang)}-${slug(c.second)}-utility`,
+      pitch: `A utility bridging ${c.lang} and ${c.second}. Cross-stack depth without looking scattered.`,
+      leapFrom: "One bridge repo beats five unrelated ones.",
       stack: [c.lang, c.second],
-    });
-  }
-
-  if (c.frontend) {
-    pool.push({
-      id: "starter-ui",
-      emoji: "🧚",
-      title: "one-screen-ui",
-      pitch: "A single-screen interface that makes one of your tools delightful. Design is the point.",
-      leapFrom: `Wrap a slice of ${c.flagship} in something a stranger enjoys clicking.`,
-      stack: [c.lang, "ui"],
-    });
-  }
-
-  if (c.poke.includes("Ditto") || c.poke.includes("Eevee")) {
-    pool.push({
-      id: "starter-shape",
-      emoji: "🌀",
-      title: "shapeshift-lab",
-      pitch: "A repo that is allowed to change form: three tiny experiments, one README that explains the thread.",
-      leapFrom: "Lean into the experimental energy already on the profile, with a public finish line.",
-      stack: [c.lang, "experimental"],
+      pillars: pillar(focusKey, "systems"),
     });
   }
 
@@ -379,7 +667,7 @@ function cleanStarterText(value) {
     .trim();
 }
 
-function normalizeStarter(raw, index = 0) {
+function normalizeStarter(raw, index = 0, fallbackKeys = []) {
   if (!raw || typeof raw !== "object") return null;
   const title = slug(raw.title, `starter-${index + 1}`);
   const pitch = cleanStarterText(raw.pitch || raw.body || "");
@@ -388,6 +676,11 @@ function normalizeStarter(raw, index = 0) {
   const stack = Array.isArray(raw.stack)
     ? raw.stack.map((s) => cleanStarterText(s)).filter(Boolean).slice(0, 4)
     : [];
+  const inferred = inferPillarsFromText(`${title} ${pitch} ${stack.join(" ")}`);
+  const pillars = normalizePillars(raw.pillars, [
+    ...inferred.map((p) => p.key),
+    ...fallbackKeys,
+  ]);
   return {
     id: String(raw.id || title),
     emoji: String(raw.emoji || "✦").slice(0, 4),
@@ -395,25 +688,30 @@ function normalizeStarter(raw, index = 0) {
     pitch,
     leapFrom,
     stack,
+    pillars,
   };
 }
 
 function profileSketch(payload) {
   const c = starterContext(payload);
+  const focus = (payload?.profileFocus?.top || []).map((f) => `${f.label} ${f.score}`).join(", ");
   const repoBits = (payload?.analyzedRepos || [])
     .slice(0, 8)
     .map((a) => {
-      const topics = (a.repo?.topics || []).slice(0, 3).join(", ");
-      return `- ${a.repo?.name} (${a.repo?.language || "?"}, ${a.pokemon?.name || "Eevee"})${
-        a.repo?.description ? `: ${String(a.repo.description).slice(0, 90)}` : ""
-      }${topics ? ` [${topics}]` : ""}`;
+      const topFocus = Object.entries(a.focusScores || {})
+        .sort((x, y) => y[1] - x[1])[0];
+      const focusBit = topFocus ? focusAreaLabel(topFocus[0]) : "";
+      return `- ${a.repo?.name} (${a.repo?.language || "?"})${focusBit ? ` [${focusBit}]` : ""}${
+        a.oneLiner ? `: ${String(a.oneLiner).slice(0, 80)}` : ""
+      }`;
     })
     .join("\n");
   return [
     `User: @${c.login}`,
+    `CS focus: ${focus || "(mixed)"}`,
     `Stack: ${[c.lang, c.second].filter(Boolean).join(", ")}`,
     `Flagship: ${c.flagship}`,
-    `Topics: ${c.topics.slice(0, 8).join(", ") || "(none)"}`,
+    `Outsider read: ${payload?.improvements?.positioning?.outsiderRead || buildOutsiderRead(payload)}`,
     "Repos:",
     repoBits || "(thin public sample)",
   ].join("\n");
@@ -423,8 +721,8 @@ export function refreshStartersHeuristic(payload, { seed = 0, excludeTitles = []
   const starters = pickStarters(buildStarterPool(payload), { count: 5, seed, excludeTitles });
   const direction = cleanStarterText(steer).slice(0, 160);
   const note = direction
-    ? `A fresh heuristic batch aimed at "${direction}", still leaping off your public stack. OpenAI can get more specific if a key is set.`
-    : "A fresh batch leaping off your public repos.";
+    ? `A fresh batch aimed at "${direction}", still grounded in your public focus.`
+    : "Five project ideas aligned with how your profile reads today.";
   return { starters, source: "heuristic", note };
 }
 
@@ -433,10 +731,11 @@ export async function generateSteerStarters(payload, { steer = "", seed = 0, exc
   const direction = cleanStarterText(steer).slice(0, 280);
 
   const avoid = (excludeTitles || []).slice(0, 8).join(", ");
-  const system = `You invent 5 small public GitHub starter repos for THIS person.
-They must bounce off skills already visible (named repos, languages, topics).
-Weekend-scale, specific, a little personality. Never generic "build a portfolio".
-If they described a direction, steer toward it without abandoning their stack.
+  const system = `You invent 5 small public GitHub projects to improve THIS person's public coding presence.
+Think like a recruiter coach: projects should sharpen their story, focus area, and portfolio.
+Weekend-scale, specific, grounded in their real repos and CS focus.
+Never suggest "add tests" or "add CI" as the main pitch.
+If they described a direction, steer toward it.
 Leap from: name a real repo or public habit.
 No em dashes. Product name is PokéGit.
 
@@ -444,10 +743,18 @@ Return ONLY JSON:
 {
   "note": "one short sentence to the user about this batch",
   "starters": [
-    { "emoji": "one emoji", "title": "kebab-case-repo-name", "pitch": "2 sentences", "leapFrom": "one sentence", "stack": ["lang", "theme"] }
+    {
+      "emoji": "one emoji",
+      "title": "kebab-case-repo-name",
+      "pitch": "2 sentences",
+      "leapFrom": "one sentence",
+      "stack": ["lang", "theme"],
+      "pillars": ["ai", "research"]
+    }
   ]
 }
-Exactly 5 starters.`;
+Exactly 5 starters.
+pillars: 1-3 keys from ai, llm, infra, research, graphics, frontend, systems, security, data, mobile, presence (portfolio/README), portfolio. Match the project's CS story.`;
 
   try {
     const result = await openaiChatJson({
@@ -458,7 +765,7 @@ Exactly 5 starters.`;
         profileSketch(payload),
         direction
           ? `\nDirection they asked for:\n${direction}`
-          : "\nNo extra direction. Surprise them with a fresh but grounded batch.",
+          : "\nNo extra direction. Suggest projects that improve how they present publicly.",
         avoid ? `\nAvoid repeating these titles: ${avoid}` : "",
       ].join(""),
     });
@@ -477,7 +784,11 @@ Exactly 5 starters.`;
         }
       }
     }
-    const starters = (parsed?.starters || []).map(normalizeStarter).filter(Boolean).slice(0, 5);
+    const focusKey = payload?.profileFocus?.top?.[0]?.key || "systems";
+    const starters = (parsed?.starters || [])
+      .map((s, i) => normalizeStarter(s, i, [focusKey]))
+      .filter(Boolean)
+      .slice(0, 5);
     if (starters.length < 5) {
       const filler = pickStarters(buildStarterPool(payload), {
         count: 5 - starters.length,
@@ -489,7 +800,7 @@ Exactly 5 starters.`;
     return {
       starters: starters.slice(0, 5),
       source: "openai",
-      note: cleanStarterText(parsed?.note || "") || "Five starters aimed at your public stack.",
+      note: cleanStarterText(parsed?.note || "") || "Five starters aimed at your public presence.",
     };
   } catch {
     return heuristic;
